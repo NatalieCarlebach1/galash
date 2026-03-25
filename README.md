@@ -20,24 +20,79 @@ tgt image ─┘   multi-scale features        └─ CrossChangeAttn ───�
 - DINOv2 backbone (remote-sensing variant)
 - SAM2.1 prompt encoder
 
-## Setup
+## Installation
+
+### Prerequisites
+
+- Python >= 3.10
+- CUDA >= 11.8 (GPU required for training)
+- Git
+
+### 1. Clone the repository
 
 ```bash
-# Install SAM2 (from https://github.com/facebookresearch/sam2)
+git clone git@github.com:talshaharabany/galash.git
+cd galash
+```
+
+### 2. Create a virtual environment (recommended)
+
+```bash
+conda create -n galash python=3.12 -y
+conda activate galash
+```
+
+### 3. Install PyTorch
+
+Install PyTorch with CUDA support for your system from [pytorch.org](https://pytorch.org/get-started/locally/):
+
+```bash
+# Example for CUDA 12.x
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+```
+
+### 4. Install SAM2
+
+```bash
 git clone https://github.com/facebookresearch/sam2.git
 cd sam2 && pip install -e . && cd ..
+```
 
-# Install dependencies
+### 5. Install remaining dependencies
+
+```bash
 pip install -r requirements.txt
+```
 
-# Download SAM2.1 checkpoints
-cd checkpoints
-# tiny (149M), small (176M), base_plus (309M), large (857M)
+### 6. Download SAM2.1 checkpoints
+
+```bash
+mkdir -p checkpoints && cd checkpoints
+
+# Download the variant(s) you need:
+# Tiny (149M) — fastest, good for prototyping
 wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt
+
+# Small (176M)
 wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
+
+# Base+ (309M) — recommended
 wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt
+
+# Large (857M) — best quality
 wget https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
+
 cd ..
+```
+
+### 7. Verify installation
+
+```bash
+python -c "
+from model import ChangeDetector, SAM2_VARIANTS
+from dataset import build_loaders
+print('All imports OK')
+"
 ```
 
 ## Data
