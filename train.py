@@ -39,7 +39,7 @@ import torch
 import torch.nn.functional as F
 from torch.amp import GradScaler
 
-from model import ChangeDetector, SAM2_VARIANTS
+from model import ChangeDetector, ENCODERS, DECODERS, SAM2_VARIANTS, list_encoders, list_decoders
 from dataset import build_loaders
 
 
@@ -240,17 +240,21 @@ class CSVLogger:
 # ---------------------------------------------------------------------------
 def main():
     p = argparse.ArgumentParser()
-    # Model
-    p.add_argument("--dino", default="KevinCha/dinov2-vit-base-remote-sensing")
-    p.add_argument("--sam2_variant", default=None, choices=list(SAM2_VARIANTS.keys()),
-                   help="SAM2.1 variant: tiny, small, base_plus, large (auto-resolves ckpt+cfg)")
-    p.add_argument("--sam2_ckpt", default=None, help="Explicit SAM2 checkpoint path (overrides --sam2_variant)")
-    p.add_argument("--sam2_cfg", default=None, help="Explicit SAM2 config (overrides --sam2_variant)")
-    p.add_argument("--sam2_ckpt_dir", default="checkpoints", help="Directory containing SAM2 checkpoints")
+    # Model — new unified interface
+    p.add_argument("--encoder", default="dinov2_rs_base", help="Encoder name from registry or HuggingFace ID")
+    p.add_argument("--decoder", default="sam2_base_plus", help="Decoder name from registry")
+    p.add_argument("--ckpt_dir", default="checkpoints", help="Directory containing decoder checkpoints")
     p.add_argument("--finetune_decoder", action="store_true",
-                   help="Fine-tune SAM2 decoder with lower LR")
+                   help="Fine-tune decoder with lower LR")
     p.add_argument("--decoder_lr_scale", type=float, default=0.1,
                    help="LR multiplier for decoder fine-tuning (default: 0.1)")
+    p.add_argument("--list_models", action="store_true", help="List all available encoders/decoders and exit")
+    # Backward compat (still work if provided)
+    p.add_argument("--dino", default=None, help="(deprecated) Use --encoder instead")
+    p.add_argument("--sam2_variant", default=None, help="(deprecated) Use --decoder instead")
+    p.add_argument("--sam2_ckpt", default=None, help="(deprecated) Explicit SAM2 checkpoint path")
+    p.add_argument("--sam2_cfg", default=None, help="(deprecated) Explicit SAM2 config")
+    p.add_argument("--sam2_ckpt_dir", default=None, help="(deprecated) Use --ckpt_dir instead")
     # Data
     p.add_argument("--data", default="data")
     p.add_argument("--datasets", nargs="+", default=None)
@@ -281,25 +285,31 @@ def main():
     args = p.parse_args()
     use_amp = not args.no_amp
 
+    # ── list models and exit ──
+    if args.list_models:
+        print("\n=== ENCODERS ===")
+        list_encoders()
+        print("\n=== DECODERS ===")
+        list_decoders()
+        return
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ── resolve SAM2 checkpoint + config ──
-    if args.sam2_ckpt is not None and args.sam2_cfg is not None:
-        # Explicit paths (backward compatible)
-        sam2_ckpt = args.sam2_ckpt
-        sam2_cfg = args.sam2_cfg
-    elif args.sam2_variant is not None:
-        variant = SAM2_VARIANTS[args.sam2_variant]
-        sam2_ckpt = os.path.join(args.sam2_ckpt_dir, variant["ckpt"])
-        sam2_cfg = variant["cfg"]
-    else:
-        # Default to base_plus
-        variant = SAM2_VARIANTS["base_plus"]
-        sam2_ckpt = os.path.join(args.sam2_ckpt_dir, variant["ckpt"])
-        sam2_cfg = variant["cfg"]
+    # ── resolve backward-compatible args ──
+    ckpt_dir = args.sam2_ckpt_dir or args.ckpt_dir
+    encoder_name = args.dino or args.encoder
+    sam2_ckpt = args.sam2_ckpt
+    sam2_cfg = args.sam2_cfg
 
-    print(f"SAM2 checkpoint: {sam2_ckpt}")
-    print(f"SAM2 config:     {sam2_cfg}")
+    # Map old --sam2_variant to new --decoder
+    decoder_name = args.decoder
+    if args.sam2_variant is not None:
+        variant_to_decoder = {"tiny": "sam2_tiny", "small": "sam2_small",
+                              "base_plus": "sam2_base_plus", "large": "sam2_large"}
+        decoder_name = variant_to_decoder[args.sam2_variant]
+
+    print(f"Encoder: {encoder_name}")
+    print(f"Decoder: {decoder_name}")
     if args.finetune_decoder:
         print(f"Decoder fine-tuning: ON (lr_scale={args.decoder_lr_scale})")
     print()
@@ -311,8 +321,8 @@ def main():
 
     # save config
     full_config = vars(args).copy()
-    full_config["sam2_ckpt_resolved"] = sam2_ckpt
-    full_config["sam2_cfg_resolved"] = sam2_cfg
+    full_config["encoder_resolved"] = encoder_name
+    full_config["decoder_resolved"] = decoder_name
     with open(os.path.join(run_dir, "config.json"), "w") as f:
         json.dump(full_config, f, indent=2)
 
@@ -338,11 +348,13 @@ def main():
     # ── model ──
     print("\nBuilding model …")
     model = ChangeDetector(
-        dino_model_name=args.dino,
-        sam2_checkpoint=sam2_ckpt,
-        sam2_config=sam2_cfg,
+        encoder=encoder_name,
+        decoder=decoder_name,
+        ckpt_dir=ckpt_dir,
         finetune_decoder=args.finetune_decoder,
         decoder_lr_scale=args.decoder_lr_scale,
+        sam2_checkpoint=sam2_ckpt,
+        sam2_config=sam2_cfg,
     ).to(device)
 
     n_train_p = sum(p.numel() for p in model.trainable_parameters())

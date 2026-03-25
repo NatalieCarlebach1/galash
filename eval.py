@@ -24,7 +24,7 @@ import torch.nn.functional as F
 from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
 
-from model import ChangeDetector, SAM2_VARIANTS
+from model import ChangeDetector, ENCODERS, DECODERS, SAM2_VARIANTS
 from dataset import CDDataset, ValTransform, IMG_EXTS
 
 
@@ -130,15 +130,18 @@ def evaluate_dataset(model, ds_name, split_dir, img_size, batch_size, num_worker
 def main():
     p = argparse.ArgumentParser()
     # model
-    p.add_argument("--dino", default="KevinCha/dinov2-vit-base-remote-sensing")
-    p.add_argument("--sam2_variant", default=None, choices=list(SAM2_VARIANTS.keys()),
-                   help="SAM2.1 variant: tiny, small, base_plus, large")
-    p.add_argument("--sam2_ckpt", default=None)
-    p.add_argument("--sam2_cfg", default=None)
-    p.add_argument("--sam2_ckpt_dir", default="checkpoints")
+    p.add_argument("--encoder", default="dinov2_rs_base", help="Encoder name or HuggingFace ID")
+    p.add_argument("--decoder", default="sam2_base_plus", help="Decoder name from registry")
+    p.add_argument("--ckpt_dir", default="checkpoints", help="Directory containing decoder checkpoints")
     p.add_argument("--finetune_decoder", action="store_true",
                    help="Load model with finetune_decoder=True (for loading finetuned decoder weights)")
     p.add_argument("--checkpoint", required=True, help="best.pt from training")
+    # backward compat
+    p.add_argument("--dino", default=None, help="(deprecated) Use --encoder")
+    p.add_argument("--sam2_variant", default=None, help="(deprecated) Use --decoder")
+    p.add_argument("--sam2_ckpt", default=None, help="(deprecated)")
+    p.add_argument("--sam2_cfg", default=None, help="(deprecated)")
+    p.add_argument("--sam2_ckpt_dir", default=None, help="(deprecated)")
     # data
     p.add_argument("--data", default="data")
     p.add_argument("--datasets", nargs="+", default=None,
@@ -156,27 +159,22 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ── resolve SAM2 checkpoint + config ──
-    if args.sam2_ckpt is not None and args.sam2_cfg is not None:
-        sam2_ckpt = args.sam2_ckpt
-        sam2_cfg = args.sam2_cfg
-    elif args.sam2_variant is not None:
-        variant = SAM2_VARIANTS[args.sam2_variant]
-        sam2_ckpt = os.path.join(args.sam2_ckpt_dir, variant["ckpt"])
-        sam2_cfg = variant["cfg"]
-    else:
-        # Try to auto-detect from checkpoint config
-        variant = SAM2_VARIANTS["base_plus"]
-        sam2_ckpt = os.path.join(args.sam2_ckpt_dir, variant["ckpt"])
-        sam2_cfg = variant["cfg"]
+    # ── resolve backward compat ──
+    ckpt_dir = args.sam2_ckpt_dir or args.ckpt_dir
+    encoder_name = args.dino or args.encoder
+    decoder_name = args.decoder
+    if args.sam2_variant:
+        decoder_name = f"sam2_{args.sam2_variant}"
 
     # ── model ──
     print("Loading model …")
     model = ChangeDetector(
-        dino_model_name=args.dino,
-        sam2_checkpoint=sam2_ckpt,
-        sam2_config=sam2_cfg,
+        encoder=encoder_name,
+        decoder=decoder_name,
+        ckpt_dir=ckpt_dir,
         finetune_decoder=args.finetune_decoder,
+        sam2_checkpoint=args.sam2_ckpt,
+        sam2_config=args.sam2_cfg,
     ).to(device)
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)

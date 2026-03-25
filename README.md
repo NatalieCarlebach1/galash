@@ -116,40 +116,73 @@ Use `python download_datasets.py` to download them automatically.
 ## Training
 
 ```bash
-# Recommended: base_plus decoder with fine-tuning
+# List all available encoders and decoders
+python train.py --list_models
+
+# Recommended: DINOv2-RS base + SAM2.1 base+ with fine-tuning
 python train.py \
-    --dino KevinCha/dinov2-vit-base-remote-sensing \
-    --sam2_variant base_plus \
+    --encoder dinov2_rs_base \
+    --decoder sam2_base_plus \
     --finetune_decoder \
-    --decoder_lr_scale 0.1 \
-    --img_size 512 \
-    --batch 4 --epochs 50 \
-    --latent_temp 0.03 --w_latent 0.2 \
-    --tta
+    --img_size 512 --batch 4 --epochs 50 --tta
+
+# DINOv3 satellite encoder (needs HF access) + SAM2.1 large
+python train.py \
+    --encoder dinov3_sat_large \
+    --decoder sam2_large \
+    --finetune_decoder
+
+# SAM1 decoder (no high-res features)
+python train.py --encoder dinov2_base --decoder sam1_vit_l
+
+# SAM3 decoder (auto-downloads from HuggingFace)
+python train.py --encoder dinov2_rs_base --decoder sam3 --finetune_decoder
 
 # Lighter variant
-python train.py --sam2_variant tiny --epochs 30
-
-# Explicit checkpoint paths (backward compatible)
-python train.py \
-    --sam2_ckpt checkpoints/sam2.1_hiera_base_plus.pt \
-    --sam2_cfg configs/sam2.1/sam2.1_hiera_b+.yaml
+python train.py --encoder dinov2_rs_small --decoder sam2_tiny --epochs 30
 ```
 
-### SAM2.1 variants
+### Available Encoders
 
-| Variant      | Flag              | Params | Notes                  |
-|-------------|-------------------|--------|------------------------|
-| Tiny        | `--sam2_variant tiny`      | 39M  | Fastest, baseline      |
-| Small       | `--sam2_variant small`     | 46M  | Good speed/quality     |
-| Base+       | `--sam2_variant base_plus` | 81M  | Recommended            |
-| Large       | `--sam2_variant large`     | 224M | Best quality           |
+| Name | HuggingFace ID | Dim | Layers | Patch | Notes |
+|------|---------------|-----|--------|-------|-------|
+| `dinov2_small` | facebook/dinov2-small | 384 | 12 | 14 | |
+| `dinov2_base` | facebook/dinov2-base | 768 | 12 | 14 | |
+| `dinov2_large` | facebook/dinov2-large | 1024 | 24 | 14 | |
+| `dinov2_giant` | facebook/dinov2-giant | 1536 | 40 | 14 | |
+| `dinov2_small_reg` | facebook/dinov2-with-registers-small | 384 | 12 | 14 | With register tokens |
+| `dinov2_base_reg` | facebook/dinov2-with-registers-base | 768 | 12 | 14 | With register tokens |
+| `dinov2_large_reg` | facebook/dinov2-with-registers-large | 1024 | 24 | 14 | With register tokens |
+| `dinov2_giant_reg` | facebook/dinov2-with-registers-giant | 1536 | 40 | 14 | With register tokens |
+| `dinov2_rs_small` | KevinCha/dinov2-vit-small-remote-sensing | 384 | 12 | 16 | RS fine-tuned |
+| `dinov2_rs_base` | KevinCha/dinov2-vit-base-remote-sensing | 768 | 12 | 16 | RS fine-tuned (default) |
+| `dinov2_rs_large` | KevinCha/dinov2-vit-large-remote-sensing | 1024 | 24 | 14 | RS fine-tuned |
+| `dinov3_small` | facebook/dinov3-vits16-pretrain-lvd1689m | 384 | 12 | 16 | Gated, needs HF access |
+| `dinov3_base` | facebook/dinov3-vitb16-pretrain-lvd1689m | 768 | 12 | 16 | Gated |
+| `dinov3_large` | facebook/dinov3-vitl16-pretrain-lvd1689m | 1024 | 24 | 16 | Gated |
+| `dinov3_huge` | facebook/dinov3-vith16plus-pretrain-lvd1689m | 1280 | 32 | 16 | Gated |
+| `dinov3_sat_large` | facebook/dinov3-vitl16-pretrain-sat493m | 1024 | 24 | 16 | Satellite, gated |
+
+### Available Decoders
+
+| Name | Family | Checkpoint | High-Res | Notes |
+|------|--------|-----------|----------|-------|
+| `sam1_vit_b` | SAM1 | sam_vit_b.pth | No | Lightest |
+| `sam1_vit_l` | SAM1 | sam_vit_l.pth | No | |
+| `sam1_vit_h` | SAM1 | sam_vit_h.pth | No | |
+| `sam2_tiny` | SAM2.1 | sam2.1_hiera_tiny.pt | Yes | Fastest SAM2 |
+| `sam2_small` | SAM2.1 | sam2.1_hiera_small.pt | Yes | |
+| `sam2_base_plus` | SAM2.1 | sam2.1_hiera_base_plus.pt | Yes | Recommended |
+| `sam2_large` | SAM2.1 | sam2.1_hiera_large.pt | Yes | Best SAM2 quality |
+| `sam3` | SAM3 | Auto-download from HF | Yes | 848M, single variant |
 
 ### Key training flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--finetune_decoder` | off | Fine-tune SAM2 decoder (recommended) |
+| `--encoder` | dinov2_rs_base | Encoder from registry or HuggingFace ID |
+| `--decoder` | sam2_base_plus | Decoder from registry |
+| `--finetune_decoder` | off | Fine-tune decoder with lower LR |
 | `--decoder_lr_scale` | 0.1 | LR multiplier for decoder |
 | `--latent_temp` | 0.03 | Temperature for latent change map loss |
 | `--w_latent` | 0.2 | Weight for latent auxiliary loss |
@@ -162,7 +195,8 @@ python train.py \
 
 ```bash
 python eval.py \
-    --sam2_variant base_plus \
+    --encoder dinov2_rs_base \
+    --decoder sam2_base_plus \
     --finetune_decoder \
     --checkpoint runs/YYYYMMDD_HHMMSS/best.pt \
     --tta \
@@ -183,7 +217,18 @@ Training augmentations (all configurable):
 
 Training on LEVIR-CD + LEVIR-CD+ + S2Looking + SECOND + CDD (~17k pairs):
 
-| Config | Val F1 | Test F1 | Test IoU |
-|--------|--------|---------|----------|
-| v1: tiny decoder (frozen) | 0.907 | 0.871 | 0.772 |
-| v2: base+ decoder (fine-tuned) + augmentation | TBD | TBD | TBD |
+### Baseline comparison table
+
+| Encoder | Decoder | Fine-tune | Val F1 | Test F1 | Test IoU |
+|---------|---------|-----------|--------|---------|----------|
+| dinov2_rs_base | sam2_tiny (frozen) | No | 0.907 | 0.871 | 0.772 |
+| dinov2_rs_base | sam2_base_plus | Yes | TBD | TBD | TBD |
+| dinov2_rs_base | sam2_large | Yes | TBD | TBD | TBD |
+| dinov2_rs_base | sam1_vit_b | No | TBD | TBD | TBD |
+| dinov2_rs_base | sam1_vit_l | No | TBD | TBD | TBD |
+| dinov2_rs_base | sam3 | Yes | TBD | TBD | TBD |
+| dinov2_rs_large | sam2_base_plus | Yes | TBD | TBD | TBD |
+| dinov2_base | sam2_base_plus | Yes | TBD | TBD | TBD |
+| dinov2_large | sam2_base_plus | Yes | TBD | TBD | TBD |
+| dinov3_sat_large | sam2_base_plus | Yes | TBD | TBD | TBD |
+| dinov3_base | sam2_base_plus | Yes | TBD | TBD | TBD |

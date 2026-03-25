@@ -1,17 +1,23 @@
 """
-Change Detection Pipeline  v2
+Change Detection Pipeline  v3
 ──────────────────────────────
 ref image ─┐                          ┌─ Bridge v2 (trainable) ──┐
-           ├→ DINOv2/v3 (frozen) ─────┤  FPN + residual + xformer├→ SAM2.1 Decoder → mask + IoU
+           ├→ Encoder (frozen) ───────┤  FPN + residual + xformer├→ Decoder → mask + IoU
 tgt image ─┘   multi-scale features   └─ CrossChangeAttn ────────┘
                                           (trainable, temp.)    ↗ small change map (aux loss)
 
-v2 changes:
-  - SAM2.1 family support (t/s/b+/l) with optional decoder fine-tuning
-  - Improved Bridge: residual blocks, FPN top-down fusion, transformer refinement
-  - TTA (test-time augmentation) support
+Supported encoders:
+  - DINOv2: small/base/large/giant (patch14), with-registers variants
+  - DINOv2-RS: KevinCha small/base/large (remote sensing fine-tuned)
+  - DINOv3: small/base/large/huge (patch16), satellite variants (gated, needs HF access)
+
+Supported decoders:
+  - SAM1: vit_b / vit_l / vit_h
+  - SAM2.1: tiny / small / base_plus / large
+  - SAM3: single variant (848M, uses HF download)
 """
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,15 +25,75 @@ from torch import Tensor
 from typing import List, Optional, Tuple
 
 
-# ---------------------------------------------------------------------------
-# SAM2.1 variant registry
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════
+# ENCODER REGISTRY
+# ═══════════════════════════════════════════════════════════════════════
+ENCODERS = {
+    # --- DINOv2 official (patch_size=14) ---
+    "dinov2_small":       {"hf": "facebook/dinov2-small",       "dim": 384,  "layers": 12, "patch": 14},
+    "dinov2_base":        {"hf": "facebook/dinov2-base",        "dim": 768,  "layers": 12, "patch": 14},
+    "dinov2_large":       {"hf": "facebook/dinov2-large",       "dim": 1024, "layers": 24, "patch": 14},
+    "dinov2_giant":       {"hf": "facebook/dinov2-giant",       "dim": 1536, "layers": 40, "patch": 14},
+    # --- DINOv2 with registers (patch_size=14) ---
+    "dinov2_small_reg":   {"hf": "facebook/dinov2-with-registers-small",  "dim": 384,  "layers": 12, "patch": 14},
+    "dinov2_base_reg":    {"hf": "facebook/dinov2-with-registers-base",   "dim": 768,  "layers": 12, "patch": 14},
+    "dinov2_large_reg":   {"hf": "facebook/dinov2-with-registers-large",  "dim": 1024, "layers": 24, "patch": 14},
+    "dinov2_giant_reg":   {"hf": "facebook/dinov2-with-registers-giant",  "dim": 1536, "layers": 40, "patch": 14},
+    # --- DINOv2 Remote Sensing (KevinCha) ---
+    "dinov2_rs_small":    {"hf": "KevinCha/dinov2-vit-small-remote-sensing",     "dim": 384,  "layers": 12, "patch": 16, "loader": "kevincha"},
+    "dinov2_rs_base":     {"hf": "KevinCha/dinov2-vit-base-remote-sensing",      "dim": 768,  "layers": 12, "patch": 16, "loader": "kevincha"},
+    "dinov2_rs_large":    {"hf": "KevinCha/dinov2-vit-large-remote-sensing",     "dim": 1024, "layers": 24, "patch": 14, "loader": "kevincha"},
+    "dinov2_rs_large_50": {"hf": "KevinCha/dinov2-vit-large-remote-sensing-50ep","dim": 1024, "layers": 24, "patch": 14, "loader": "kevincha"},
+    # --- DINOv3 official (patch_size=16, gated — needs HF access) ---
+    "dinov3_small":       {"hf": "facebook/dinov3-vits16-pretrain-lvd1689m",      "dim": 384,  "layers": 12, "patch": 16},
+    "dinov3_base":        {"hf": "facebook/dinov3-vitb16-pretrain-lvd1689m",      "dim": 768,  "layers": 12, "patch": 16},
+    "dinov3_large":       {"hf": "facebook/dinov3-vitl16-pretrain-lvd1689m",      "dim": 1024, "layers": 24, "patch": 16},
+    "dinov3_huge":        {"hf": "facebook/dinov3-vith16plus-pretrain-lvd1689m",  "dim": 1280, "layers": 32, "patch": 16},
+    # --- DINOv3 satellite (patch_size=16, gated) ---
+    "dinov3_sat_large":   {"hf": "facebook/dinov3-vitl16-pretrain-sat493m",       "dim": 1024, "layers": 24, "patch": 16},
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# DECODER REGISTRY
+# ═══════════════════════════════════════════════════════════════════════
+DECODERS = {
+    # --- SAM1 (no high_res_features, returns 2 values) ---
+    "sam1_vit_b":         {"family": "sam1", "ckpt": "sam_vit_b.pth",              "type": "vit_b"},
+    "sam1_vit_l":         {"family": "sam1", "ckpt": "sam_vit_l.pth",              "type": "vit_l"},
+    "sam1_vit_h":         {"family": "sam1", "ckpt": "sam_vit_h.pth",              "type": "vit_h"},
+    # --- SAM2.1 (high_res_features, returns 4 values) ---
+    "sam2_tiny":          {"family": "sam2", "ckpt": "sam2.1_hiera_tiny.pt",       "cfg": "configs/sam2.1/sam2.1_hiera_t.yaml"},
+    "sam2_small":         {"family": "sam2", "ckpt": "sam2.1_hiera_small.pt",      "cfg": "configs/sam2.1/sam2.1_hiera_s.yaml"},
+    "sam2_base_plus":     {"family": "sam2", "ckpt": "sam2.1_hiera_base_plus.pt",  "cfg": "configs/sam2.1/sam2.1_hiera_b+.yaml"},
+    "sam2_large":         {"family": "sam2", "ckpt": "sam2.1_hiera_large.pt",      "cfg": "configs/sam2.1/sam2.1_hiera_l.yaml"},
+    # --- SAM3 (same interface as SAM2, single variant) ---
+    "sam3":               {"family": "sam3"},
+}
+
+# Backward compatibility
 SAM2_VARIANTS = {
     "tiny":      {"ckpt": "sam2.1_hiera_tiny.pt",      "cfg": "configs/sam2.1/sam2.1_hiera_t.yaml"},
-    "small":     {"ckpt": "sam2.1_hiera_small.pt",     "cfg": "configs/sam2.1/sam2.1_hiera_s.yaml"},
-    "base_plus": {"ckpt": "sam2.1_hiera_base_plus.pt", "cfg": "configs/sam2.1/sam2.1_hiera_b+.yaml"},
-    "large":     {"ckpt": "sam2.1_hiera_large.pt",     "cfg": "configs/sam2.1/sam2.1_hiera_l.yaml"},
+    "small":     {"ckpt": "sam2.1_hiera_small.pt",      "cfg": "configs/sam2.1/sam2.1_hiera_s.yaml"},
+    "base_plus": {"ckpt": "sam2.1_hiera_base_plus.pt",  "cfg": "configs/sam2.1/sam2.1_hiera_b+.yaml"},
+    "large":     {"ckpt": "sam2.1_hiera_large.pt",      "cfg": "configs/sam2.1/sam2.1_hiera_l.yaml"},
 }
+
+
+def list_encoders():
+    """Print all available encoders."""
+    print(f"{'Name':<22s} {'HuggingFace ID':<55s} {'Dim':>5s} {'Layers':>6s} {'Patch':>5s}")
+    print("-" * 100)
+    for name, info in ENCODERS.items():
+        print(f"{name:<22s} {info['hf']:<55s} {info['dim']:>5d} {info['layers']:>6d} {info['patch']:>5d}")
+
+
+def list_decoders():
+    """Print all available decoders."""
+    print(f"{'Name':<18s} {'Family':<6s} {'Checkpoint':<35s}")
+    print("-" * 65)
+    for name, info in DECODERS.items():
+        ckpt = info.get("ckpt", "HuggingFace auto-download")
+        print(f"{name:<18s} {info['family']:<6s} {ckpt:<35s}")
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +111,6 @@ class CrossChangeAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        # learnable inverse-temperature (log-space for stable optimisation)
         self.log_temp = nn.Parameter(torch.log(torch.tensor(1.0 / init_temperature)))
 
         self.q_proj = nn.Linear(dim, dim)
@@ -58,23 +123,21 @@ class CrossChangeAttention(nn.Module):
         B, S, D = ref_tokens.shape
         H, d = self.num_heads, self.head_dim
 
-        q = self.q_proj(ref_tokens).view(B, S, H, d).transpose(1, 2)  # [B,H,S,d]
+        q = self.q_proj(ref_tokens).view(B, S, H, d).transpose(1, 2)
         k = self.k_proj(tgt_tokens).view(B, S, H, d).transpose(1, 2)
         v = self.v_proj(tgt_tokens).view(B, S, H, d).transpose(1, 2)
 
         temp = self.log_temp.exp().clamp(min=1.0)
         attn_logits = (q @ k.transpose(-2, -1)) * (temp / d**0.5)
-        attn_weights = attn_logits.softmax(dim=-1)  # [B,H,S,S]
+        attn_weights = attn_logits.softmax(dim=-1)
 
         attended = (attn_weights @ v).transpose(1, 2).reshape(B, S, D)
         attended = self.out_proj(attended)
 
-        # change = how the target *differs* from the reference
         change_tokens = self.norm(attended - ref_tokens)
 
-        # small map: 1 − diagonal-similarity (high → more change)
-        avg_attn = attn_weights.mean(dim=1)  # [B,S,S]
-        similarity = torch.diagonal(avg_attn, dim1=1, dim2=2)  # [B,S]
+        avg_attn = attn_weights.mean(dim=1)
+        similarity = torch.diagonal(avg_attn, dim1=1, dim2=2)
         change_map = 1.0 - similarity
 
         return change_tokens, change_map
@@ -84,7 +147,6 @@ class CrossChangeAttention(nn.Module):
 # Building blocks for Bridge v2
 # ---------------------------------------------------------------------------
 class ResidualBlock(nn.Module):
-    """Conv residual block with GroupNorm + GELU."""
     def __init__(self, dim: int):
         super().__init__()
         self.block = nn.Sequential(
@@ -101,7 +163,6 @@ class ResidualBlock(nn.Module):
 
 
 class TransformerRefinement(nn.Module):
-    """Lightweight spatial self-attention for refining bridge output."""
     def __init__(self, dim: int = 256, num_heads: int = 4, num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
         layer = nn.TransformerEncoderLayer(
@@ -113,38 +174,30 @@ class TransformerRefinement(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x: Tensor) -> Tensor:
-        """x: [B, C, H, W] → [B, C, H, W]"""
         B, C, H, W = x.shape
-        tokens = x.flatten(2).transpose(1, 2)  # [B, HW, C]
+        tokens = x.flatten(2).transpose(1, 2)
         tokens = self.encoder(tokens)
         tokens = self.norm(tokens)
         return tokens.transpose(1, 2).view(B, C, H, W)
 
 
 # ---------------------------------------------------------------------------
-# Bridge v2: FPN + residual + transformer refinement  (TRAINABLE)
+# Bridge v2  (TRAINABLE)
 # ---------------------------------------------------------------------------
 class Bridge(nn.Module):
-    """Projects multi-scale DINOv2 features → SAM2-compatible tensors.
+    """Projects multi-scale encoder features → decoder-compatible tensors.
 
-    v2 improvements:
-        - Residual blocks in each scale projection
-        - FPN-style top-down fusion (high-level semantics inform low-level)
-        - Transformer refinement before SAM decoder
-
-    Returns
-        image_embeddings : [B, 256, th, tw]    for mask decoder
-        dense_prompt     : [B, 256, th, tw]    change-aware prompt
-        high_res_features: [feat_s0, feat_s1]  for SAM2 upsampling path
-                           feat_s0: [B, 32, 4*th, 4*tw]
-                           feat_s1: [B, 64, 2*th, 2*tw]
+    Adapts output based on decoder family:
+      - SAM2/SAM3: returns high_res_features [feat_s0, feat_s1]
+      - SAM1: returns high_res_features=None
     """
 
-    def __init__(self, dino_dim: int = 768, sam_dim: int = 256, num_scales: int = 4):
+    def __init__(self, dino_dim: int = 768, sam_dim: int = 256, num_scales: int = 4,
+                 use_high_res: bool = True):
         super().__init__()
         self.sam_dim = sam_dim
+        self.use_high_res = use_high_res
 
-        # Per-scale linear projection + residual conv refinement
         self.scale_projs = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(dino_dim, sam_dim),
@@ -155,32 +208,21 @@ class Bridge(nn.Module):
             for _ in range(num_scales)
         ])
         self.scale_convs = nn.ModuleList([
-            nn.Sequential(
-                ResidualBlock(sam_dim),
-                ResidualBlock(sam_dim),
-            )
+            nn.Sequential(ResidualBlock(sam_dim), ResidualBlock(sam_dim))
             for _ in range(num_scales)
         ])
 
-        # FPN top-down lateral connections (from coarse to fine)
         self.lateral_convs = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(sam_dim, sam_dim, 1),
-                nn.GroupNorm(32, sam_dim),
-            )
-            for _ in range(num_scales - 1)  # no lateral for the coarsest level
+            nn.Sequential(nn.Conv2d(sam_dim, sam_dim, 1), nn.GroupNorm(32, sam_dim))
+            for _ in range(num_scales - 1)
         ])
 
-        # Final fusion after FPN
         self.fusion = nn.Sequential(
             nn.Conv2d(sam_dim * num_scales, sam_dim, 1),
             ResidualBlock(sam_dim),
         )
-
-        # Transformer refinement on fused features
         self.refine = TransformerRefinement(dim=sam_dim, num_heads=4, num_layers=2)
 
-        # Dense change prompt
         self.change_proj = nn.Sequential(
             nn.Linear(dino_dim, sam_dim),
             nn.LayerNorm(sam_dim),
@@ -188,109 +230,167 @@ class Bridge(nn.Module):
             nn.Linear(sam_dim, sam_dim),
         )
 
-        # High-res feature projectors for SAM2 decoder upsampling path
-        self.hr_proj_s1 = nn.Sequential(
-            nn.Linear(dino_dim, 64),
-            nn.GELU(),
-        )
-        self.hr_conv_s1 = nn.Sequential(
-            nn.Conv2d(64, 64, 3, padding=1, bias=False),
-            nn.GroupNorm(16, 64),
-            nn.GELU(),
-            nn.Conv2d(64, 64, 3, padding=1, bias=False),
-            nn.GroupNorm(16, 64),
-            nn.GELU(),
-        )
-        self.hr_proj_s0 = nn.Sequential(
-            nn.Linear(dino_dim, 32),
-            nn.GELU(),
-        )
-        self.hr_conv_s0 = nn.Sequential(
-            nn.Conv2d(32, 32, 3, padding=1, bias=False),
-            nn.GroupNorm(8, 32),
-            nn.GELU(),
-            nn.Conv2d(32, 32, 3, padding=1, bias=False),
-            nn.GroupNorm(8, 32),
-            nn.GELU(),
-        )
+        if use_high_res:
+            self.hr_proj_s1 = nn.Sequential(nn.Linear(dino_dim, 64), nn.GELU())
+            self.hr_conv_s1 = nn.Sequential(
+                nn.Conv2d(64, 64, 3, padding=1, bias=False), nn.GroupNorm(16, 64), nn.GELU(),
+                nn.Conv2d(64, 64, 3, padding=1, bias=False), nn.GroupNorm(16, 64), nn.GELU(),
+            )
+            self.hr_proj_s0 = nn.Sequential(nn.Linear(dino_dim, 32), nn.GELU())
+            self.hr_conv_s0 = nn.Sequential(
+                nn.Conv2d(32, 32, 3, padding=1, bias=False), nn.GroupNorm(8, 32), nn.GELU(),
+                nn.Conv2d(32, 32, 3, padding=1, bias=False), nn.GroupNorm(8, 32), nn.GELU(),
+            )
 
-    def forward(
-        self,
-        multi_feats: List[Tensor],
-        change_tokens: Tensor,
-        h: int, w: int,
-        target_h: int = 64, target_w: int = 64,
-    ):
+    def forward(self, multi_feats, change_tokens, h, w, target_h=64, target_w=64):
         B = multi_feats[0].size(0)
 
-        # Step 1: per-scale projection + residual refinement
         scale_maps = []
         for feat, proj, conv in zip(multi_feats, self.scale_projs, self.scale_convs):
-            x = proj(feat)                                             # [B,S,C]
-            x = x.view(B, h, w, self.sam_dim).permute(0, 3, 1, 2)     # [B,C,h,w]
+            x = proj(feat)
+            x = x.view(B, h, w, self.sam_dim).permute(0, 3, 1, 2)
             x = F.interpolate(x, (target_h, target_w), mode="bilinear", align_corners=False)
             x = conv(x)
             scale_maps.append(x)
 
-        # Step 2: FPN top-down pathway (coarse → fine)
-        # scale_maps[0]=earliest/finest, scale_maps[-1]=latest/coarsest
         for i in range(len(scale_maps) - 1, 0, -1):
             coarse = scale_maps[i]
             lateral = self.lateral_convs[i - 1](scale_maps[i - 1])
-            scale_maps[i - 1] = lateral + coarse  # already same spatial size
+            scale_maps[i - 1] = lateral + coarse
 
-        # Step 3: fuse + refine
-        image_emb = self.fusion(torch.cat(scale_maps, dim=1))  # [B,256,th,tw]
+        image_emb = self.fusion(torch.cat(scale_maps, dim=1))
         image_emb = self.refine(image_emb)
 
-        # Dense change prompt
         dense = self.change_proj(change_tokens)
         dense = dense.view(B, h, w, self.sam_dim).permute(0, 3, 1, 2)
         dense = F.interpolate(dense, (target_h, target_w), mode="bilinear", align_corners=False)
 
-        # High-res features from early DINOv2 layers
-        feat_s1 = self.hr_proj_s1(multi_feats[0])
-        feat_s1 = feat_s1.view(B, h, w, 64).permute(0, 3, 1, 2)
-        feat_s1 = F.interpolate(feat_s1, (target_h * 2, target_w * 2), mode="bilinear", align_corners=False)
-        feat_s1 = self.hr_conv_s1(feat_s1)
+        high_res_features = None
+        if self.use_high_res:
+            feat_s1 = self.hr_proj_s1(multi_feats[0])
+            feat_s1 = feat_s1.view(B, h, w, 64).permute(0, 3, 1, 2)
+            feat_s1 = F.interpolate(feat_s1, (target_h * 2, target_w * 2), mode="bilinear", align_corners=False)
+            feat_s1 = self.hr_conv_s1(feat_s1)
 
-        feat_s0 = self.hr_proj_s0(multi_feats[0])
-        feat_s0 = feat_s0.view(B, h, w, 32).permute(0, 3, 1, 2)
-        feat_s0 = F.interpolate(feat_s0, (target_h * 4, target_w * 4), mode="bilinear", align_corners=False)
-        feat_s0 = self.hr_conv_s0(feat_s0)
+            feat_s0 = self.hr_proj_s0(multi_feats[0])
+            feat_s0 = feat_s0.view(B, h, w, 32).permute(0, 3, 1, 2)
+            feat_s0 = F.interpolate(feat_s0, (target_h * 4, target_w * 4), mode="bilinear", align_corners=False)
+            feat_s0 = self.hr_conv_s0(feat_s0)
 
-        return image_emb, dense, [feat_s0, feat_s1]
+            high_res_features = [feat_s0, feat_s1]
+
+        return image_emb, dense, high_res_features
 
 
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════
+# Encoder / Decoder loading helpers
+# ═══════════════════════════════════════════════════════════════════════
+
+def _load_encoder(name_or_hf: str):
+    """Load an encoder by registry name or HuggingFace ID.
+
+    Returns a model with:
+      - model.config.hidden_size
+      - model.config.num_hidden_layers
+      - model.config.patch_size
+      - model(pixel_values=x).hidden_states  (tuple of [B, 1+S, D])
+    """
+    # Check registry first
+    info = ENCODERS.get(name_or_hf)
+    if info is not None:
+        hf_id = info["hf"]
+        loader = info.get("loader")
+    else:
+        # Treat as direct HuggingFace ID
+        hf_id = name_or_hf
+        loader = None
+        # Check if it's a KevinCha model
+        if "kevincha" in hf_id.lower() or "remote-sensing" in hf_id.lower():
+            loader = "kevincha"
+
+    if loader == "kevincha":
+        from load_dino_rs import load_dinov2_remote_sensing
+        return load_dinov2_remote_sensing(hf_id)
+
+    from transformers import AutoModel
+    return AutoModel.from_pretrained(hf_id, output_hidden_states=True, trust_remote_code=True)
+
+
+def _load_decoder_sam1(checkpoint: str, model_type: str, ckpt_dir: str):
+    """Load SAM1 mask decoder + prompt encoder."""
+    from segment_anything import sam_model_registry
+    ckpt_path = os.path.join(ckpt_dir, checkpoint) if not os.path.isabs(checkpoint) else checkpoint
+    sam = sam_model_registry[model_type](checkpoint=ckpt_path if os.path.isfile(ckpt_path) else None)
+    return sam.mask_decoder, sam.prompt_encoder, "sam1"
+
+
+def _load_decoder_sam2(checkpoint: str, config: str, ckpt_dir: str):
+    """Load SAM2.1 mask decoder + prompt encoder."""
+    from sam2.build_sam import build_sam2
+    ckpt_path = os.path.join(ckpt_dir, checkpoint) if not os.path.isabs(checkpoint) else checkpoint
+    sam2 = build_sam2(config, ckpt_path)
+    return sam2.sam_mask_decoder, sam2.sam_prompt_encoder, "sam2"
+
+
+def _load_decoder_sam3(ckpt_dir: str):
+    """Load SAM3 mask decoder + prompt encoder (from tracker)."""
+    from sam3.model_builder import build_tracker
+    tracker = build_tracker(apply_temporal_disambiguation=False)
+    return tracker.sam_mask_decoder, tracker.sam_prompt_encoder, "sam3"
+
+
+def load_decoder(name: str, ckpt_dir: str = "checkpoints"):
+    """Load a decoder by registry name.
+
+    Returns: (mask_decoder, prompt_encoder, family_str)
+    """
+    info = DECODERS[name]
+    family = info["family"]
+
+    if family == "sam1":
+        return _load_decoder_sam1(info["ckpt"], info["type"], ckpt_dir)
+    elif family == "sam2":
+        return _load_decoder_sam2(info["ckpt"], info["cfg"], ckpt_dir)
+    elif family == "sam3":
+        return _load_decoder_sam3(ckpt_dir)
+    else:
+        raise ValueError(f"Unknown decoder family: {family}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Full Pipeline
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════
 class ChangeDetector(nn.Module):
     """
-    DINOv2/v3 (frozen) → CrossChangeAttention (trainable)
-                        → Bridge v2            (trainable)
-                        → SAM2.1 MaskDecoder   (frozen or fine-tuned) → masks + IoU
+    Encoder (frozen) → CrossChangeAttention (trainable)
+                      → Bridge v2            (trainable)
+                      → Decoder              (frozen or fine-tuned) → masks + IoU
     """
 
     def __init__(
         self,
-        dino_model_name: str,
-        sam2_checkpoint: str,
-        sam2_config: str = "sam2_hiera_l.yaml",
+        encoder: str = "dinov2_rs_base",
+        decoder: str = "sam2_base_plus",
+        ckpt_dir: str = "checkpoints",
         num_heads: int = 8,
         temperature: float = 0.07,
         feature_layers: Optional[List[int]] = None,
         sam_target_size: int = 64,
         finetune_decoder: bool = False,
         decoder_lr_scale: float = 0.1,
+        # Backward compat: direct HF/path overrides
+        dino_model_name: Optional[str] = None,
+        sam2_checkpoint: Optional[str] = None,
+        sam2_config: Optional[str] = None,
     ):
         super().__init__()
         self.sam_target_size = sam_target_size
         self.finetune_decoder = finetune_decoder
         self.decoder_lr_scale = decoder_lr_scale
 
-        # ── DINOv2 / v3 backbone  (FROZEN) ──────────────────────────
-        self.dino = self._load_dino(dino_model_name)
+        # ── Encoder (FROZEN) ─────────────────────────────────────────
+        encoder_id = dino_model_name if dino_model_name else encoder
+        self.dino = _load_encoder(encoder_id)
         for p in self.dino.parameters():
             p.requires_grad = False
         self.dino.eval()
@@ -300,59 +400,45 @@ class ChangeDetector(nn.Module):
         self.patch_size = cfg.patch_size
         n = cfg.num_hidden_layers
 
-        # layers tapped for multi-scale features
         if feature_layers is None:
             self.feature_layers = [n // 4 - 1, n // 2 - 1, 3 * n // 4 - 1, n - 1]
         else:
             self.feature_layers = feature_layers
 
-        # ── Cross-Attention  (TRAINABLE) ─────────────────────────────
-        self.cross_attn = CrossChangeAttention(
-            self.dino_dim, num_heads, temperature
-        )
+        # ── Cross-Attention (TRAINABLE) ──────────────────────────────
+        self.cross_attn = CrossChangeAttention(self.dino_dim, num_heads, temperature)
 
-        # ── Bridge / Projector  (TRAINABLE) ──────────────────────────
-        self.bridge = Bridge(
-            self.dino_dim, sam_dim=256, num_scales=len(self.feature_layers)
-        )
+        # ── Decoder loading ──────────────────────────────────────────
+        if sam2_checkpoint and sam2_config:
+            # Backward compat: explicit checkpoint + config
+            from sam2.build_sam import build_sam2
+            sam2 = build_sam2(sam2_config, sam2_checkpoint)
+            self.sam_decoder = sam2.sam_mask_decoder
+            self.sam_prompt_enc = sam2.sam_prompt_encoder
+            self.decoder_family = "sam2"
+        else:
+            self.sam_decoder, self.sam_prompt_enc, self.decoder_family = load_decoder(
+                decoder, ckpt_dir
+            )
 
-        # ── SAM2 Mask Decoder  (FROZEN or FINE-TUNED) ───────────────
-        self._load_sam2(sam2_checkpoint, sam2_config)
-
-    # -------- DINO loading --------
-    @staticmethod
-    def _load_dino(name_or_path: str):
-        try:
-            from huggingface_hub import hf_hub_download
-            import json
-            cfg_path = hf_hub_download(name_or_path, "config.json")
-            with open(cfg_path) as f:
-                raw = json.load(f)
-            if raw.get("architectures") == ["DINOv2"] and "embed_dim" in raw:
-                from load_dino_rs import load_dinov2_remote_sensing
-                return load_dinov2_remote_sensing(name_or_path)
-        except Exception:
-            pass
-
-        from transformers import AutoModel
-        return AutoModel.from_pretrained(name_or_path, output_hidden_states=True)
-
-    # -------- SAM2 loading helpers --------
-    def _load_sam2(self, checkpoint: str, config: str):
-        from sam2.build_sam import build_sam2
-
-        sam2 = build_sam2(config, checkpoint)
-        self.sam_decoder = sam2.sam_mask_decoder
-        self.sam_prompt_enc = sam2.sam_prompt_encoder
-
-        if not self.finetune_decoder:
+        # Freeze decoder (optionally)
+        if not finetune_decoder:
             for p in self.sam_decoder.parameters():
                 p.requires_grad = False
             self.sam_decoder.eval()
-        # prompt encoder is always frozen
         for p in self.sam_prompt_enc.parameters():
             p.requires_grad = False
         self.sam_prompt_enc.eval()
+
+        # ── Bridge (TRAINABLE) — adapts based on decoder family ──────
+        use_high_res = self.decoder_family in ("sam2", "sam3")
+        self.bridge = Bridge(
+            self.dino_dim, sam_dim=256, num_scales=len(self.feature_layers),
+            use_high_res=use_high_res,
+        )
+
+        self.encoder_name = encoder_id
+        self.decoder_name = decoder
 
     # -------- frozen feature extraction --------
     @torch.no_grad()
@@ -364,7 +450,7 @@ class ChangeDetector(nn.Module):
 
         ref_multi, tgt_multi = [], []
         for i in self.feature_layers:
-            h = hs[i + 1][:, 1:, :]
+            h = hs[i + 1][:, 1:, :]  # skip CLS
             ref_multi.append(h[:B])
             tgt_multi.append(h[B:])
 
@@ -372,57 +458,62 @@ class ChangeDetector(nn.Module):
         ref_tok, tgt_tok = last[:B], last[B:]
         return ref_multi, tgt_multi, ref_tok, tgt_tok
 
+    # -------- decoder dispatch --------
+    def _decode(self, image_emb, dense_prompt, high_res_features, B):
+        image_pe = self.sam_prompt_enc.get_dense_pe()
+        th, tw = image_emb.shape[-2:]
+        if image_pe.shape[-2:] != (th, tw):
+            image_pe = F.interpolate(image_pe, (th, tw), mode="bilinear", align_corners=False)
+
+        sparse_emb, _ = self.sam_prompt_enc(points=None, boxes=None, masks=None)
+
+        if self.decoder_family == "sam1":
+            masks, iou_pred = self.sam_decoder(
+                image_embeddings=image_emb,
+                image_pe=image_pe,
+                sparse_prompt_embeddings=sparse_emb.expand(B, -1, -1),
+                dense_prompt_embeddings=dense_prompt,
+                multimask_output=False,
+            )
+        else:
+            # SAM2 / SAM3 interface
+            masks, iou_pred, _, _ = self.sam_decoder(
+                image_embeddings=image_emb,
+                image_pe=image_pe,
+                sparse_prompt_embeddings=sparse_emb.expand(B, -1, -1),
+                dense_prompt_embeddings=dense_prompt,
+                multimask_output=False,
+                repeat_image=False,
+                high_res_features=high_res_features,
+            )
+
+        return masks, iou_pred
+
     # -------- forward --------
     def forward(self, ref: Tensor, tgt: Tensor):
         B = ref.size(0)
         ph = ref.shape[2] // self.patch_size
         pw = ref.shape[3] // self.patch_size
 
-        # 1) DINOv2 features (frozen)
         ref_multi, tgt_multi, ref_tok, tgt_tok = self._dino_forward_pair(ref, tgt)
-
-        # 2) Cross-attention (trainable)
         change_tokens, change_map = self.cross_attn(ref_tok, tgt_tok)
 
-        # 3) Multi-scale difference + change residual → bridge input
         bridge_input = [
             (r - t) + change_tokens for r, t in zip(ref_multi, tgt_multi)
         ]
 
-        # 4) Bridge → SAM2 format (trainable)
         th = tw = self.sam_target_size
         image_emb, dense_prompt, high_res_features = self.bridge(
             bridge_input, change_tokens, ph, pw, th, tw
         )
 
-        # 5) SAM2 decoder
-        image_pe = self.sam_prompt_enc.get_dense_pe()
-        if image_pe.shape[-2:] != (th, tw):
-            image_pe = F.interpolate(
-                image_pe, (th, tw), mode="bilinear", align_corners=False
-            )
-
-        sparse_emb, _ = self.sam_prompt_enc(
-            points=None, boxes=None, masks=None
-        )
-
-        masks, iou_pred, _sam_tokens, _obj_scores = self.sam_decoder(
-            image_embeddings=image_emb,
-            image_pe=image_pe,
-            sparse_prompt_embeddings=sparse_emb.expand(B, -1, -1),
-            dense_prompt_embeddings=dense_prompt,
-            multimask_output=False,
-            repeat_image=False,
-            high_res_features=high_res_features,
-        )
-
+        masks, iou_pred = self._decode(image_emb, dense_prompt, high_res_features, B)
         return masks, iou_pred, change_map
 
     # -------- TTA forward --------
     @torch.no_grad()
     def forward_tta(self, ref: Tensor, tgt: Tensor, flips: bool = True, rotations: bool = True):
-        """Test-time augmentation: average predictions over geometric transforms."""
-        transforms = [(False, False, 0)]  # original
+        transforms = [(False, False, 0)]
         if flips:
             transforms += [(True, False, 0), (False, True, 0), (True, True, 0)]
         if rotations:
@@ -434,18 +525,15 @@ class ChangeDetector(nn.Module):
         for hflip, vflip, rot90k in transforms:
             r, t = ref.clone(), tgt.clone()
             if hflip:
-                r = r.flip(-1)
-                t = t.flip(-1)
+                r, t = r.flip(-1), t.flip(-1)
             if vflip:
-                r = r.flip(-2)
-                t = t.flip(-2)
+                r, t = r.flip(-2), t.flip(-2)
             if rot90k > 0:
                 r = torch.rot90(r, rot90k, [-2, -1])
                 t = torch.rot90(t, rot90k, [-2, -1])
 
             masks, iou_pred, _ = self(r, t)
 
-            # undo transforms on masks
             if rot90k > 0:
                 masks = torch.rot90(masks, -rot90k, [-2, -1])
             if vflip:
@@ -461,21 +549,18 @@ class ChangeDetector(nn.Module):
                 iou_sum = iou_sum + iou_pred
 
         n = len(transforms)
-        # Return logits from averaged probabilities
         avg_prob = mask_sum / n
         avg_logits = torch.logit(avg_prob.clamp(1e-6, 1 - 1e-6))
         return avg_logits, iou_sum / n, None
 
     # -------- convenience --------
     def trainable_parameters(self):
-        """Only the bridge + cross-attention are optimised (+ optionally decoder)."""
         yield from self.cross_attn.parameters()
         yield from self.bridge.parameters()
         if self.finetune_decoder:
             yield from self.sam_decoder.parameters()
 
     def param_groups(self, lr: float):
-        """Return param groups with differential LR for decoder fine-tuning."""
         groups = [
             {"params": list(self.cross_attn.parameters()) + list(self.bridge.parameters()),
              "lr": lr},
@@ -488,7 +573,6 @@ class ChangeDetector(nn.Module):
         return groups
 
     def train(self, mode: bool = True):
-        """Keep frozen parts in eval regardless of mode."""
         super().train(mode)
         self.dino.eval()
         self.sam_prompt_enc.eval()
