@@ -1,0 +1,44 @@
+# S2Looking augmentation / training config.
+# Matches open-cd ChangerEx's S2Looking pipeline (which most 66-68 F1 methods
+# on this benchmark follow, including FIBTNet and BAN's open-cd backbone).
+#
+# Reference (from configs/changer/changer_ex_mit-b0_512x512_80k_s2looking.py):
+#   MultiImgRandomRotFlip(rotate_prob=0.5, flip_prob=0.5, degree=(-20, 20))
+#   MultiImgRandomCrop(crop_size=(512,512), cat_max_ratio=0.75)
+#   MultiImgExchangeTime(prob=0.5)
+#   MultiImgPhotoMetricDistortion(brightness_delta=10, contrast_range=(0.8,1.2),
+#                                 saturation_range=(0.8,1.2), hue_delta=10)
+
+dataset: s2looking
+img_size: 512
+test_img_size: 1024
+
+normalization:
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+augmentations:
+  - {op: random_flip,   direction: horizontal, prob: 0.5}
+  - {op: random_flip,   direction: vertical,   prob: 0.5}
+  - {op: random_rotate, degrees: 20, prob: 0.5}
+  - {op: random_crop,   size: 512, cat_max_ratio: 0.75}
+  - {op: temporal_swap, prob: 0.5}
+  - {op: photometric_distortion, brightness_delta: 10,
+     contrast_range: [0.8, 1.2], saturation_range: [0.8, 1.2], hue_delta: 10}
+
+training:
+  batch: 16
+  epochs: 300
+  patience: 15
+  lr: 1.0e-4
+  warmup: 3
+  decoder_lr_scale: 0.1
+  finetune_decoder: false
+  tta: true
+
+reference_methods:
+  - {name: UniChange, year: 2025, f1: 0.6932, url: "https://arxiv.org/abs/2511.02607"}
+  - {name: SChanger,  year: 2025, f1: 0.6895, url: "https://arxiv.org/abs/2503.20734"}
+  - {name: FIBTNet,   year: 2024, f1: 0.6860}
+  - {name: BAN-CF,    year: 2024, f1: 0.6670}
+  - {name: ChangerEx, year: 2023, f1: 0.6620}

@@ -1,0 +1,41 @@
+# DSIFN-CD augmentation / training config.
+# Matches ChangeFormer pipeline on DSIFN-CD-256 (the wgcban-preprocessed
+# 256×256 tiled variant used by all code-released baselines).
+#
+# DDPM-CD achieves 96.65 F1 on DSIFN with ZERO augmentation — but its
+# advantage comes from heavy DDPM pretraining on ~1M RS tiles, not aug.
+# ChangeFormer uses aug and achieves 94.67, so we adopt its pipeline.
+# Note: our DSIFN-CD split is from the official Real/subset (10000/2998/3000),
+# which differs slightly from the DSIFN-CD-256 Dropbox redistribution; we
+# document this in the paper.
+
+dataset: dsifn_cd
+img_size: 256
+test_img_size: 256
+
+normalization:
+  mean: [0.5, 0.5, 0.5]
+  std:  [0.5, 0.5, 0.5]
+
+augmentations:
+  - {op: random_flip,  direction: horizontal, prob: 0.5}
+  - {op: random_flip,  direction: vertical,   prob: 0.5}
+  - {op: scale_random_crop, size: 256, scale_range: [1.0, 1.2]}
+  - {op: gaussian_blur, radius_range: [0.0, 1.0], prob: 1.0, independent: true}
+  - {op: color_jitter, brightness: 0.3, contrast: 0.3, saturation: 0.3, hue: 0.3,
+     independent: true}
+
+training:
+  batch: 16
+  epochs: 300
+  patience: 15
+  lr: 6.0e-5
+  warmup: 3
+  decoder_lr_scale: 0.1
+  finetune_decoder: false
+  tta: true
+
+reference_methods:
+  - {name: DDPM-CD,      year: 2024, f1: 0.9665, iou: 0.9128, notes: "zero aug"}
+  - {name: ChangeFormer, year: 2022, f1: 0.9467, iou: 0.8871}
+  - {name: BIT,          year: 2021, f1: 0.8761, iou: 0.7796}

@@ -1,0 +1,43 @@
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Specialist CD architectures.}
+Early CD methods extended Siamese U-Nets with feature differencing
+(FC-EF, FC-Siam-conc/diff~\citep{daudt2018fully}) or spatio-temporal attention
+(STANet~\citep{chen2020spatial}). IFNet~\citep{zhang2020deeply} introduced
+deeply-supervised fusion; SNUNet~\citep{fang2021snunet} proposed a nested
+Siamese U-Net. The transformer era brought BIT~\citep{chen2021remote},
+ChangeFormer~\citep{bandara2022changeformer}, and
+ChangerEx~\citep{fang2023changer}. TinyCD~\citep{codegoni2023tinycd} showed
+that aggressive architectural compression can match larger baselines with
+0.28~M parameters. More recently, ChangeStar~\citep{zheng2022changestar} and
+Changen~\citep{zheng2023changen} demonstrate the value of synthetic
+pretraining, while DDPM-CD~\citep{bandara2024ddpmcd} extracts features from a
+pretrained diffusion model.
+
+\paragraph{Foundation models for change detection.}
+Several works freeze or lightly adapt large self-supervised backbones.
+TTP~\citep{chen2024ttp} uses LoRA on SAM's image encoder and attains 92.1 F1
+on LEVIR-CD. BAN~\citep{li2024ban} freezes CLIP ViT-L and learns a small
+bi-temporal adapter on top. SAM-CD~\citep{dingsamcd} combines a ViT encoder
+with SAM's mask decoder for CD. AnyChange~\citep{zheng2024segment} explores
+zero-shot change detection with SAM; it does not fine-tune but instead uses
+point-prompt heuristics. UniChange~\citep{zeng2025unichange} extends to
+multi-modal LLM-conditioned CD. SChanger~\citep{sun2025schanger} reports the
+current LEVIR-CD SOTA (92.87 F1) with a custom Siamese head.
+Our work differs in two key respects: (i) we systematically study
+\emph{pairings} of encoder and decoder families rather than fixing one; and
+(ii) we leverage the \emph{dense-prompt slot} of the SAM decoder, which prior
+SAM-based CD work has not exploited.
+
+\paragraph{Datasets and evaluation.}
+LEVIR-CD~\citep{chen2020spatial} remains the most-reported benchmark
+(7120/1024/2048 train/val/test 256$^2$ crops). Larger variants include
+LEVIR-CD+~\citep{zheng2022changestar}, S2Looking~\citep{shen2021s2looking}
+(rural, off-nadir), and CDD~\citep{lebedev2018change} (4 seasons).
+DSIFN-CD~\citep{zhang2020deeply} and SECOND~\citep{yang2021second} cover
+multi-city and multi-class settings respectively; we follow standard practice
+and report the binary-CD collapse for SECOND. A recent reality-check
+study~\citep{corley2024reality} shows that F1 scores on CDD have saturated
+past the point of statistical significance for single-seed comparisons; we
+report IoU alongside F1 on CDD for this reason.

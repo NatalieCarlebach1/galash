@@ -105,7 +105,8 @@ def compute_loss(
 # Train / Validate / Test
 # ---------------------------------------------------------------------------
 def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=50,
-                    latent_temperature=0.03, use_ohem=True, ohem_ratio=0.7):
+                    latent_temperature=0.03, use_ohem=True, ohem_ratio=0.7,
+                    ema=None):
     model.train()
     running = {}
     tp = fp = fn = 0
@@ -130,6 +131,10 @@ def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=5
         torch.nn.utils.clip_grad_norm_(model.trainable_parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
+
+        # EMA update after optimiser step
+        if ema is not None:
+            ema.update(model)
 
         for k, v in metrics.items():
             running[k] = running.get(k, 0.0) + v
@@ -163,7 +168,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=5
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, scaler, latent_temperature=0.03, use_tta=False):
+def evaluate(model, loader, device, scaler, latent_temperature=0.03, use_tta=False,
+             threshold: float = 0.5):
     model.eval()
     running = {}
     tp = fp = fn = tn = 0
@@ -192,7 +198,7 @@ def evaluate(model, loader, device, scaler, latent_temperature=0.03, use_tta=Fal
             running[k] = running.get(k, 0.0) + v
 
         pred = F.interpolate(masks, mask.shape[-2:], mode="bilinear", align_corners=False)
-        pred_bin = (pred.sigmoid() > 0.5).float()
+        pred_bin = (pred.sigmoid() > threshold).float()
         tp += (pred_bin * mask).sum().item()
         fp += (pred_bin * (1 - mask)).sum().item()
         fn += ((1 - pred_bin) * mask).sum().item()
@@ -209,6 +215,43 @@ def evaluate(model, loader, device, scaler, latent_temperature=0.03, use_tta=Fal
     return avg
 
 
+@torch.no_grad()
+def _search_threshold(model, val_loader, device, scaler, use_tta=False,
+                      latent_temperature=0.03,
+                      thresholds=(0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70)):
+    """Run once over val, accumulate soft predictions + GT, pick threshold with max F1."""
+    model.eval()
+    all_preds = []
+    all_gts = []
+    for ref, tgt, mask in val_loader:
+        ref, tgt, mask = ref.to(device), tgt.to(device), mask.to(device)
+        with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
+            if use_tta:
+                masks, _, _ = model.forward_tta(ref, tgt)
+            else:
+                masks, _, _ = model(ref, tgt)
+        pred = F.interpolate(masks, mask.shape[-2:], mode="bilinear", align_corners=False)
+        all_preds.append(pred.sigmoid().cpu())
+        all_gts.append(mask.cpu())
+    preds = torch.cat(all_preds, dim=0)
+    gts = torch.cat(all_gts, dim=0)
+
+    best_t = 0.5
+    best_f1 = -1.0
+    eps = 1e-8
+    for t in thresholds:
+        b = (preds > t).float()
+        tp = (b * gts).sum().item()
+        fp = (b * (1 - gts)).sum().item()
+        fn = ((1 - b) * gts).sum().item()
+        prec = tp / (tp + fp + eps); rec = tp / (tp + fn + eps)
+        f1 = 2 * prec * rec / (prec + rec + eps)
+        print(f"    threshold={t:.2f}  val_f1={f1:.4f}")
+        if f1 > best_f1:
+            best_f1 = f1; best_t = t
+    return best_t
+
+
 def print_metrics(prefix, m):
     print(
         f"  {prefix:<6s} loss={m['loss']:.4f}  F1={m['f1']:.4f}  "
@@ -219,6 +262,58 @@ def print_metrics(prefix, m):
 # ---------------------------------------------------------------------------
 # CSV Logger
 # ---------------------------------------------------------------------------
+class ModelEMA:
+    """Exponential Moving Average of model parameters.
+
+    Maintains a shadow copy of ONLY the trainable parameters (cross_attn + bridge,
+    plus sam_decoder if fine-tuned) in full fp32 precision, updated at every step
+    with `shadow = decay * shadow + (1 - decay) * param`. The frozen DINO encoder
+    is kept on the original model (no point EMAing frozen weights).
+
+    Used for val + test evaluation via `apply_to(model)` / `restore(model)`
+    context-style swaps of the trainable tensors.
+    """
+
+    def __init__(self, model, decay: float = 0.999):
+        self.decay = float(decay)
+        self.shadow = {}
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                self.shadow[name] = p.detach().clone().float()
+
+    @torch.no_grad()
+    def update(self, model):
+        d = self.decay
+        for name, p in model.named_parameters():
+            if p.requires_grad and name in self.shadow:
+                s = self.shadow[name]
+                s.mul_(d).add_(p.detach().float(), alpha=(1 - d))
+
+    @torch.no_grad()
+    def apply_to(self, model):
+        """Swap the EMA weights into the model; return a backup for restore()."""
+        backup = {}
+        for name, p in model.named_parameters():
+            if p.requires_grad and name in self.shadow:
+                backup[name] = p.detach().clone()
+                p.data.copy_(self.shadow[name].to(p.dtype).to(p.device))
+        return backup
+
+    @torch.no_grad()
+    def restore(self, model, backup):
+        for name, p in model.named_parameters():
+            if name in backup:
+                p.data.copy_(backup[name])
+
+    def state_dict(self):
+        return {k: v.clone() for k, v in self.shadow.items()}
+
+    def load_state_dict(self, sd):
+        for k, v in sd.items():
+            if k in self.shadow:
+                self.shadow[k] = v.clone().float()
+
+
 class CSVLogger:
     def __init__(self, path):
         self.path = path
@@ -282,7 +377,47 @@ def main():
     # Output
     p.add_argument("--save_dir", default="runs")
     p.add_argument("--resume", default=None)
+    # Per-dataset YAML config (overrides img_size / batch / epochs / patience / lr /
+    # warmup / finetune_decoder / tta / augmentations / normalization / dataset selection).
+    p.add_argument("--config", default=None,
+                   help="Path to a dataset YAML (configs/datasets/<name>.yaml). "
+                        "When set, reads augmentations + training hparams from the YAML.")
+    # Cheap-wins flags
+    p.add_argument("--ema", type=float, default=None,
+                   help="EMA decay for a shadow model (e.g. 0.999). "
+                        "When set, maintains an exponential-moving-average copy of trainable params, "
+                        "evaluates/saves from it. Add ~+0.3-0.5 F1 typically.")
+    p.add_argument("--search_threshold", action="store_true",
+                   help="At final test eval, sweep threshold in [0.30, 0.70] on val and "
+                        "apply the best to test. Typically +0.2-0.4 F1 on LEVIR/CDD.")
     args = p.parse_args()
+
+    # ── apply YAML config BEFORE anything downstream uses the args ──
+    cfg = None
+    if args.config:
+        from configurable_aug import load_config
+        cfg = load_config(args.config)
+        print(f"[config] loaded {args.config}")
+        # dataset selection
+        if cfg.get("dataset"):
+            args.datasets = [cfg["dataset"]]
+        # sizes + hparams
+        if "img_size" in cfg: args.img_size = int(cfg["img_size"])
+        tr = cfg.get("training") or {}
+        for k_yaml, k_arg in [
+            ("batch", "batch"), ("epochs", "epochs"), ("patience", "patience"),
+            ("lr", "lr"), ("warmup", "warmup"),
+            ("decoder_lr_scale", "decoder_lr_scale"),
+        ]:
+            if k_yaml in tr:
+                setattr(args, k_arg, tr[k_yaml])
+        if tr.get("finetune_decoder") is True:
+            args.finetune_decoder = True
+        if tr.get("tta") is True:
+            args.tta = True
+        print(f"[config] img_size={args.img_size} batch={args.batch} epochs={args.epochs} "
+              f"lr={args.lr} patience={args.patience} finetune={args.finetune_decoder} tta={args.tta}")
+
     use_amp = not args.no_amp
 
     # ── list models and exit ──
@@ -337,6 +472,7 @@ def main():
         img_size=args.img_size,
         batch_size=args.batch,
         num_workers=args.workers,
+        config=cfg,
     )
     train_loader = loaders["train"]
     val_loader = loaders.get("val")
@@ -373,6 +509,11 @@ def main():
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     scaler = GradScaler("cuda", enabled=use_amp and device.type == "cuda")
+
+    # ── EMA (optional) ──
+    ema = ModelEMA(model, decay=args.ema) if args.ema else None
+    if ema is not None:
+        print(f"  EMA: enabled (decay={args.ema})")
 
     start_epoch = 0
     best_f1 = 0.0
@@ -416,6 +557,7 @@ def main():
             latent_temperature=args.latent_temp,
             use_ohem=not args.no_ohem,
             ohem_ratio=args.ohem_ratio,
+            ema=ema,
         )
         scheduler.step()
         print_metrics("train", train_m)
@@ -427,10 +569,14 @@ def main():
 
         is_best = False
         if val_loader is not None:
+            # Evaluate using EMA weights (if enabled) — model selection should track EMA
+            ema_backup = ema.apply_to(model) if ema is not None else None
             val_m = evaluate(
                 model, val_loader, device, scaler,
                 latent_temperature=args.latent_temp,
             )
+            if ema is not None:
+                ema.restore(model, ema_backup)
             print_metrics("val", val_m)
             for k, v in val_m.items():
                 row[f"val_{k}"] = round(v, 6)
@@ -452,6 +598,11 @@ def main():
         logger.log(row)
 
         # --- save checkpoints ---
+        # When EMA is on, SAVE the EMA weights (that's what we val-evaluate on and
+        # what we want to test with). We briefly swap in EMA, copy state, then restore.
+        if ema is not None:
+            ema_backup = ema.apply_to(model)
+
         ckpt = dict(
             epoch=epoch,
             cross_attn=model.cross_attn.state_dict(),
@@ -463,10 +614,15 @@ def main():
         )
         if args.finetune_decoder:
             ckpt["sam_decoder"] = model.sam_decoder.state_dict()
+        if ema is not None:
+            ckpt["ema_shadow"] = ema.state_dict()
         torch.save(ckpt, os.path.join(run_dir, "last.pt"))
         if is_best:
             torch.save(ckpt, os.path.join(run_dir, "best.pt"))
             print(f"  ** new best F1={best_f1:.4f} saved **")
+
+        if ema is not None:
+            ema.restore(model, ema_backup)
 
         # --- early stopping ---
         if epochs_without_improvement >= args.patience:
@@ -495,10 +651,21 @@ def main():
                 model.sam_decoder.load_state_dict(ckpt["sam_decoder"])
             print(f"  loaded best.pt (epoch {ckpt['epoch']}, val_f1={ckpt['best_f1']:.4f})")
 
+        # --- Optional: sweep threshold on val, apply to test (Tier-1 cheap win) ---
+        best_threshold = 0.5
+        if args.search_threshold and val_loader is not None:
+            print("\n  Searching best threshold on val …")
+            best_threshold = _search_threshold(
+                model, val_loader, device, scaler,
+                use_tta=args.tta, latent_temperature=args.latent_temp,
+            )
+            print(f"  picked threshold = {best_threshold:.2f}")
+
         test_m = evaluate(
             model, test_loader, device, scaler,
             latent_temperature=args.latent_temp,
             use_tta=args.tta,
+            threshold=best_threshold,
         )
 
         print(f"\n  {'Metric':<12s}  Value")
@@ -510,6 +677,8 @@ def main():
         # save test results
         test_results = {k: round(v, 6) for k, v in test_m.items()}
         test_results["tta"] = args.tta
+        test_results["threshold"] = best_threshold
+        test_results["ema_decay"] = args.ema
         with open(os.path.join(run_dir, "test_results.json"), "w") as f:
             json.dump(test_results, f, indent=2)
         print(f"\n  Results saved to {run_dir}/test_results.json")

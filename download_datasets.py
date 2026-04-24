@@ -799,6 +799,13 @@ DATASETS = {
     "dynamicearthnet":  ("DynamicEarthNet",  "daily multi-temporal, 1024², 3m",             download_dynamicearthnet),
 }
 
+# Medical change-detection datasets (see download_medical.py for details).
+try:
+    from download_medical import MEDICAL_DATASETS
+    DATASETS.update(MEDICAL_DATASETS)
+except Exception:
+    pass
+
 
 # ───────────────────────────────────────────────────────────────────────
 # CLI

@@ -1,0 +1,47 @@
+# CDD / Season-Varying augmentation / training config.
+# Most methods on CDD use either:
+#   (a) BIT/ChangeFormer-style minimal aug (hflip+vflip+scale_crop+blur)
+#   (b) DDPM-CD-style ZERO aug (images in [-1,1], nothing else)
+# We adopt the ChangeFormer variant (which beats BIT by 6 F1) but explicitly
+# NOT SChanger's huge aug list (since SChanger's code is not released, so
+# replicating it is not a fair reproduction).
+#
+# Reference (verbatim from wgcban/ChangeFormer/datasets/data_utils.py, is_train=True):
+#   with_random_hflip=True, with_random_vflip=True,
+#   with_scale_random_crop=True (scale in [1.0, 1.2]),
+#   with_random_blur=True (GaussianBlur radius ~uniform [0,1]),
+#   random_color_tf=True (ColorJitter 0.3, INDEPENDENT per A/B)
+# Normalization is [0.5]×3 (NOT ImageNet), mapping to [-1, 1].
+
+dataset: cdd
+img_size: 256
+test_img_size: 256
+
+normalization:
+  mean: [0.5, 0.5, 0.5]
+  std:  [0.5, 0.5, 0.5]
+
+augmentations:
+  - {op: random_flip,  direction: horizontal, prob: 0.5}
+  - {op: random_flip,  direction: vertical,   prob: 0.5}
+  - {op: scale_random_crop, size: 256, scale_range: [1.0, 1.2]}
+  - {op: gaussian_blur, radius_range: [0.0, 1.0], prob: 1.0, independent: true}
+  - {op: color_jitter, brightness: 0.3, contrast: 0.3, saturation: 0.3, hue: 0.3,
+     independent: true}
+
+training:
+  batch: 16
+  epochs: 300
+  patience: 15
+  lr: 6.0e-5
+  warmup: 3
+  decoder_lr_scale: 0.1
+  finetune_decoder: false
+  tta: true
+
+reference_methods:
+  - {name: SChanger,     year: 2025, f1: 0.9762, iou: null}
+  - {name: ChangeStar2,  year: 2024, f1: 0.9750}
+  - {name: RFL-CDNet,    year: 2024, f1: 0.9612}
+  - {name: DDPM-CD,      year: 2024, f1: 0.9562, iou: 0.9162, primary_metric: iou}
+  - {name: ChangeFormer, year: 2022, f1: 0.9463, iou: 0.8980}

@@ -21,7 +21,7 @@ import os
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from torch.utils.data import DataLoader
 
 from model import ChangeDetector, ENCODERS, DECODERS, SAM2_VARIANTS
@@ -125,6 +125,42 @@ def evaluate_dataset(model, ds_name, split_dir, img_size, batch_size, num_worker
 
 
 # ---------------------------------------------------------------------------
+# Threshold search on val
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def search_threshold_on_val(model, val_dir, img_size, batch_size, num_workers,
+                            device, use_tta=False,
+                            thresholds=(0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70)):
+    tf = ValTransform(img_size=img_size)
+    ds = CDDataset(val_dir, transform=tf, name="val")
+    if len(ds) == 0:
+        return 0.5
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
+                        num_workers=num_workers, pin_memory=True)
+    preds, gts = [], []
+    for ref, tgt, gt in loader:
+        ref, tgt, gt = ref.to(device), tgt.to(device), gt.to(device)
+        with autocast(device_type="cuda", enabled=True):
+            if use_tta:
+                masks, _, _ = model.forward_tta(ref, tgt)
+            else:
+                masks, _, _ = model(ref, tgt)
+        pred = F.interpolate(masks, gt.shape[-2:], mode="bilinear", align_corners=False)
+        preds.append(pred.sigmoid().cpu())
+        gts.append(gt.cpu())
+    P = torch.cat(preds); G = torch.cat(gts)
+    best_t, best_f1, eps = 0.5, -1.0, 1e-8
+    for t in thresholds:
+        b = (P > t).float()
+        tp = (b * G).sum().item(); fp = (b * (1 - G)).sum().item()
+        fn = ((1 - b) * G).sum().item()
+        prec = tp / (tp + fp + eps); rec = tp / (tp + fn + eps)
+        f1 = 2 * prec * rec / (prec + rec + eps)
+        if f1 > best_f1: best_f1, best_t = f1, t
+    return best_t
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -153,6 +189,16 @@ def main():
     p.add_argument("--threshold", type=float, default=0.5)
     # TTA
     p.add_argument("--tta", action="store_true", help="Enable test-time augmentation")
+    # Tier-1 post-hoc cheap wins:
+    p.add_argument("--search_threshold", action="store_true",
+                   help="Sweep threshold on val split, apply best to test split.")
+    p.add_argument("--val_split", default="val",
+                   help="Which split to use for threshold search (default: val).")
+    p.add_argument("--test_img_sizes", nargs="+", type=int, default=None,
+                   help="List of test resolutions to evaluate (e.g. 256 384 512). "
+                        "Picks the best via val; falls back to --img_size if not set.")
+    p.add_argument("--use_ema", action="store_true",
+                   help="If checkpoint has ema_shadow, load EMA weights.")
     # output
     p.add_argument("--save_masks", default=None, help="directory to save predicted masks")
     args = p.parse_args()
@@ -182,6 +228,12 @@ def main():
     model.cross_attn.load_state_dict(ckpt["cross_attn"])
     if args.finetune_decoder and "sam_decoder" in ckpt:
         model.sam_decoder.load_state_dict(ckpt["sam_decoder"])
+    # Optional EMA swap-in
+    if args.use_ema and "ema_shadow" in ckpt:
+        print("  loading EMA shadow weights")
+        for name, p in model.named_parameters():
+            if p.requires_grad and name in ckpt["ema_shadow"]:
+                p.data.copy_(ckpt["ema_shadow"][name].to(p.dtype).to(p.device))
     epoch = ckpt.get("epoch", "?")
     best_f1 = ckpt.get("best_f1", ckpt.get("val_loss", "?"))
     print(f"  loaded epoch={epoch}  best_f1={best_f1}")
@@ -209,13 +261,44 @@ def main():
             continue
 
         print(f"Evaluating {ds_name} …")
+
+        # Determine image-size sweep for this dataset
+        sizes = args.test_img_sizes if args.test_img_sizes else [args.img_size]
+        val_dir = os.path.join(args.data, ds_name, args.val_split)
+        has_val_for_search = (args.search_threshold or len(sizes) > 1) and \
+            os.path.isdir(os.path.join(val_dir, "A"))
+
+        # Pick best (size, threshold) by max val F1
+        best_cfg = {"size": sizes[0], "threshold": args.threshold, "val_f1": None}
+        if has_val_for_search:
+            for sz in sizes:
+                t = args.threshold
+                if args.search_threshold:
+                    t = search_threshold_on_val(
+                        model, val_dir, sz, args.batch, args.workers,
+                        device, use_tta=args.tta,
+                    )
+                val_res = evaluate_dataset(
+                    model, ds_name, val_dir, sz, args.batch, args.workers,
+                    device, t, None, use_tta=args.tta,
+                )
+                if val_res is None:
+                    continue
+                print(f"  val@size={sz} threshold={t:.2f}  F1={val_res['f1']:.4f}")
+                if best_cfg["val_f1"] is None or val_res["f1"] > best_cfg["val_f1"]:
+                    best_cfg = {"size": sz, "threshold": t, "val_f1": val_res["f1"]}
+            print(f"  picked: size={best_cfg['size']} threshold={best_cfg['threshold']:.2f}  "
+                  f"(val_f1={best_cfg['val_f1']:.4f})")
+
         result = evaluate_dataset(
-            model, ds_name, split_dir, args.img_size, args.batch, args.workers,
-            device, args.threshold, args.save_masks, use_tta=args.tta,
+            model, ds_name, split_dir, best_cfg["size"], args.batch, args.workers,
+            device, best_cfg["threshold"], args.save_masks, use_tta=args.tta,
         )
         if result is None:
             print(f"  {ds_name}: 0 matched pairs, skipping")
             continue
+        result["picked_size"] = best_cfg["size"]
+        result["picked_threshold"] = best_cfg["threshold"]
 
         all_results[ds_name] = result
 

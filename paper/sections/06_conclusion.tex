@@ -1,0 +1,30 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented GALASH, a pipeline that composes frozen DINO-family and SAM-family
+foundation models into a parameter-efficient change detector. Two small
+trainable modules — Cross-Change Attention and Bridge v2 — suffice to adapt
+generic self-supervised features to bi-temporal change, achieving results
+competitive with or surpassing recent specialist architectures on six standard
+benchmarks while training only \textsc{TODO}\% of parameters.
+
+\paragraph{Limitations.} GALASH inherits the resolution and patch-size
+constraints of its backbones: DINO patch sizes of 14--16 mean that fine
+sub-patch changes can be missed. The frozen-encoder design caps adaptation
+capacity; some benchmarks (notably S2Looking) may still benefit from targeted
+fine-tuning of the backbone. Finally, our SECOND results collapse the six
+semantic classes to binary; extending the decoder head to multi-class
+semantic CD is a natural next step.
+
+\paragraph{Broader directions.} The encoder/decoder registry is a research
+platform in its own right: studying how foundation-model pretraining
+(general, remote-sensing, satellite) interacts with mask-decoder capacity
+suggests a research agenda beyond change detection. We plan to extend GALASH
+to dense multi-task remote-sensing (semantic CD, building footprint
+extraction, disaster damage assessment) and to cross-domain transfer
+(medical volumetric CD).
+
+\paragraph{Reproducibility.} All code, SLURM launch scripts, dataset
+preparation recipes, and trained checkpoints are released at
+\url{https://github.com/anonymous/galash}. Training a single GALASH baseline
+takes \textsc{TODO}~GPU-hours on one NVIDIA RTX 6000 Ada.

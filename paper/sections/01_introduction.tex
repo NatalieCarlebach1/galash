@@ -1,0 +1,63 @@
+\section{Introduction}
+\label{sec:intro}
+
+Bi-temporal remote-sensing change detection (CD) asks, given two co-registered
+images of the same scene taken at different times, to segment the pixels whose
+semantic content has changed. It underpins applications such as urban growth
+monitoring, disaster response, deforestation tracking, and infrastructure
+auditing~\citep{daudt2018fully,chen2020spatial}. Despite the maturity of the
+task, progress in the last two years has been driven almost exclusively by
+\emph{specialist} architectures --- Siamese encoders with custom fusion
+modules~\citep{fang2021snunet,chen2021remote}, hybrid CNN/transformer
+backbones~\citep{bandara2022changeformer,zheng2022changestar}, or diffusion-based
+feature extractors~\citep{bandara2024ddpmcd}. Meanwhile, general-purpose vision
+has converged on a small family of very strong self-supervised foundation
+models: \textsc{DINOv2}~\citep{oquab2023dinov2}, \textsc{DINOv3}~\citep{simeoni2025dinov3},
+and the \textsc{SAM} family for segmentation~\citep{kirillov2023segment,ravi2024sam2}.
+
+A natural question follows: \emph{are specialist CD architectures still necessary,
+or do frozen foundation models, connected by a lightweight learned adapter,
+already contain what a change detector needs?}
+
+Recent work has begun to answer this question positively for individual
+foundation-model choices. TTP~\citep{chen2024ttp} adapts \textsc{SAM}'s image
+encoder with LoRA and reports strong results on LEVIR-CD.
+BAN~\citep{li2024ban} freezes a CLIP backbone and learns a small
+change-detection adapter. SAM-CD~\citep{dingsamcd} uses SAM's mask decoder
+with a ViT encoder. However, these works (a) fix a single choice of encoder and
+decoder family, and (b) typically still require moderate-size learnable
+modules ($>$10~M parameters) and careful pre-processing. A systematic study of
+foundation-model pairings for CD, across \emph{both} axes (encoder family and
+mask-decoder family), is missing.
+
+\paragraph{Contributions.} We present \textbf{GALASH}, a unified
+change-detection pipeline and ablation platform. Our contributions are:
+
+\begin{enumerate}
+  \item \textbf{A unified encoder/decoder registry} exposing 16 DINO-family
+    encoders (DINOv2, DINOv2-with-registers, DINOv2-RS, DINOv3, DINOv3-sat)
+    and 8 SAM-family decoders (SAM-1, SAM-2.1 tiny/small/base/large, SAM-3)
+    behind a single architecture. To our knowledge this is the first paper to
+    systematically compare the 100+ encoder--decoder combinations this
+    induces.
+  \item \textbf{A Cross-Change Attention module} that uses a learnable
+    temperature to produce per-patch change representations from DINO features,
+    and which is jointly supervised with (i) the final mask and (ii) a patch-level
+    latent change loss.
+  \item \textbf{Bridge v2}: a multi-scale fusion block (FPN + transformer
+    refinement) that feeds the SAM decoder's \emph{image embedding}, \emph{dense
+    prompt}, and \emph{high-resolution} slots. Critically, we repurpose SAM's
+    dense-prompt channel --- normally unused in mask-only inference --- as a
+    change-conditioning signal.
+  \item \textbf{Only $\sim$16.5~M trainable parameters} on top of frozen
+    foundation backbones, with competitive results on six standard CD
+    benchmarks. This is 2--6$\times$ fewer trainable parameters than recent
+    specialist baselines.
+\end{enumerate}
+
+\paragraph{Paper outline.} Section~\ref{sec:related} reviews specialist CD
+architectures and foundation-model adapters. Section~\ref{sec:method} details
+GALASH, the registry, cross-change attention, and Bridge v2.
+Section~\ref{sec:experiments} reports per-benchmark comparisons to SOTA;
+Section~\ref{sec:ablations} isolates each component. Section~\ref{sec:conclusion}
+discusses limitations and directions.

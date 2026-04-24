@@ -109,9 +109,70 @@ data/{dataset_name}/
   test/
 ```
 
-Supported datasets: LEVIR-CD, LEVIR-CD+, S2Looking, SECOND, CDD, DSIFN-CD, OSCD.
+Supported aerial datasets: LEVIR-CD, LEVIR-CD+, S2Looking, SECOND, CDD, DSIFN-CD, OSCD.
 
-Use `python download_datasets.py` to download them automatically.
+```bash
+python download_datasets.py --list                                  # all entries
+python download_datasets.py --out data --datasets levir_cd cdd      # specific
+python download_datasets.py --out data --all                        # everything
+```
+
+### Medical change-detection benchmarks
+
+Medical CD uses the same `A/B/label` layout. 3-D volumes (NIfTI `.nii.gz`)
+are sliced to 2-D axial PNGs with stem `{subject}_{slice:03d}` by the
+preparer.
+
+| Key | Source | Access | Task |
+|-----|--------|--------|------|
+| `brats_reg` | BraTS-Reg (Zenodo) | **open** (~4 GB) | Pre-op vs follow-up glioma MRI. Archive ships images only (no seg) — pass `--pseudo-labels` for FLAIR-difference weak labels, or drop `seg_00.nii.gz` + `seg_01.nii.gz` next to each subject |
+| `shifts_ms` | Shifts 2.0 MS (Zenodo Part 2) | **open**, single-timepoint only (no CD labels) | MS domain-shift segmentation probe |
+| `msseg2` | FLI-IAM / OFSEP | free account | Longitudinal new-MS-lesion detection |
+| `isbi_ms` | SMART-stats | free account | Longitudinal MS over 4 time points |
+| `lumiere` | TCIA | free account | Longitudinal glioblastoma MRI |
+| `chest_imagenome` | PhysioNet | credentialed (CITI) | Sequential CXR pairs (categorical labels) |
+
+```bash
+python download_medical.py --list
+python download_medical.py --out data --datasets brats_reg --pseudo-labels   # open, ~4 GB, FLAIR-diff labels
+python download_medical.py --out data --datasets msseg2                      # after staging at data/msseg2/_tmp/
+```
+
+Evaluate on the medical benchmarks (reuses the aerial checkpoint):
+
+```bash
+sbatch slurm/eval_medical.sbatch
+# or
+DATASETS="shifts_ms brats_reg" sbatch slurm/eval_medical.sbatch
+```
+
+#### Fair-comparison medical training (MSSEG-2, ISBI-2015)
+
+SOTA methods on MSSEG-2 (DEFUSE-MS, F1 0.65 / Dice 0.55) and ISBI-2015
+(Temporal Difference Weighting, Dice 0.75 / F1 0.74) are all 3-D nnU-Net
+variants. We can't match the 3-D architecture, but we **can** match the
+training recipe — see `configs/datasets/{msseg2,isbi_ms}.yaml` which port
+LR, weight-decay, epoch budget, early-stop patience, foreground-oversampling,
+augmentation set, and (importantly) **no TTA** from the nnU-Net SOTA
+defaults.
+
+Both datasets are gated; stage the zips manually, then the queued jobs
+auto-fire:
+
+```bash
+# submit two wait-and-fire training jobs (will hold a GPU and poll every 60 s)
+bash slurm/launch_sweep.sh fair_medical
+# → submits  g-fair_msseg2  and  g-fair_isbi_ms
+
+# then, whenever you've downloaded the data:
+mv ~/Downloads/msseg2_training.zip  data/msseg2/_tmp/
+mv ~/Downloads/isbi_training.tar    data/isbi_ms/_tmp/
+# → preparer runs, slicing fires, training starts — no further action needed
+```
+
+Data sources (one-click DUA per portal, free accounts):
+- MSSEG-2: https://portal.fli-iam.irisa.fr/msseg-2/
+- ISBI-2015: https://smart-stats-tools.org/lesion-challenge  (alt mirror: https://iacl.ece.jhu.edu/index.php/MSChallenge/data)
 
 ## Training
 

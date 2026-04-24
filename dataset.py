@@ -384,11 +384,17 @@ def build_loaders(
     num_workers: int = 4,
     pin_memory: bool = True,
     val_split_ratio: float = 0.1,
+    config: Optional[Dict] = None,
 ) -> Dict[str, DataLoader]:
     """Build train / val / test DataLoaders over one or more datasets.
 
     If a dataset has no val/ split, automatically holds out `val_split_ratio`
     of its training data for validation.
+
+    If `config` is provided (a dict loaded from configs/datasets/<name>.yaml),
+    the augmentation pipeline and normalisation are taken from it — enabling
+    per-dataset fair-comparison training. When config is given, `img_size` is
+    taken from the config and `datasets` is restricted to the one in the config.
 
     Returns dict with keys "train", "val", "test".
     """
@@ -403,8 +409,13 @@ def build_loaders(
         if not datasets:
             datasets = DEFAULT_DATASETS
 
-    train_aug = Augmenter(img_size=img_size)
-    val_tf = ValTransform(img_size=img_size)
+    if config is not None:
+        from configurable_aug import ConfigurableAugmenter, ConfigurableValTransform
+        train_aug = ConfigurableAugmenter(config)
+        val_tf = ConfigurableValTransform(config)
+    else:
+        train_aug = Augmenter(img_size=img_size)
+        val_tf = ValTransform(img_size=img_size)
 
     train_parts, val_parts, test_parts = [], [], []
 

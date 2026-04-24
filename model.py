@@ -29,6 +29,11 @@ from typing import List, Optional, Tuple
 # ENCODER REGISTRY
 # ═══════════════════════════════════════════════════════════════════════
 ENCODERS = {
+    # --- DINOv1 (original DINO, Caron et al. 2021) ---
+    "dinov1_vits16":      {"hf": "facebook/dino-vits16",        "dim": 384,  "layers": 12, "patch": 16},
+    "dinov1_vits8":       {"hf": "facebook/dino-vits8",         "dim": 384,  "layers": 12, "patch": 8},
+    "dinov1_vitb16":      {"hf": "facebook/dino-vitb16",        "dim": 768,  "layers": 12, "patch": 16},
+    "dinov1_vitb8":       {"hf": "facebook/dino-vitb8",         "dim": 768,  "layers": 12, "patch": 8},
     # --- DINOv2 official (patch_size=14) ---
     "dinov2_small":       {"hf": "facebook/dinov2-small",       "dim": 384,  "layers": 12, "patch": 14},
     "dinov2_base":        {"hf": "facebook/dinov2-base",        "dim": 768,  "layers": 12, "patch": 14},
@@ -448,13 +453,17 @@ class ChangeDetector(nn.Module):
         out = self.dino(pixel_values=both)
         hs = out.hidden_states
 
+        # Skip CLS (1) plus any register tokens. DINOv2-with-registers and
+        # DINOv3 add 4 register tokens between CLS and the patch tokens.
+        n_skip = 1 + int(getattr(self.dino.config, "num_register_tokens", 0))
+
         ref_multi, tgt_multi = [], []
         for i in self.feature_layers:
-            h = hs[i + 1][:, 1:, :]  # skip CLS
+            h = hs[i + 1][:, n_skip:, :]
             ref_multi.append(h[:B])
             tgt_multi.append(h[B:])
 
-        last = hs[-1][:, 1:, :]
+        last = hs[-1][:, n_skip:, :]
         ref_tok, tgt_tok = last[:B], last[B:]
         return ref_multi, tgt_multi, ref_tok, tgt_tok
 

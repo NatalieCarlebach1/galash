@@ -1,0 +1,117 @@
+\section{Method}
+\label{sec:method}
+
+\begin{figure}[t]
+  \centering
+  % Placeholder; replace with figures/architecture.pdf
+  \fbox{\rule{0pt}{45mm}\rule{130mm}{0pt}}
+  \caption{GALASH pipeline overview. A frozen DINO-family encoder processes both
+    the reference and target images. Multi-scale patch tokens are passed to
+    Cross-Change Attention (producing per-patch change tokens and a patch-level
+    change map) and to Bridge v2, which outputs SAM-compatible embeddings.
+    The frozen (or optionally fine-tuned) SAM mask decoder emits the final change
+    mask. Red components are trainable; blue are frozen.}
+  \label{fig:architecture}
+\end{figure}
+
+GALASH takes a pair of RGB images $(I^{(r)}, I^{(t)}) \in \mathbb{R}^{H\times W\times 3}$
+and outputs a binary change map $\hat{M} \in [0,1]^{H\times W}$. The pipeline has
+three stages (Fig.~\ref{fig:architecture}): (i) a frozen foundation encoder
+that extracts multi-scale patch features; (ii) two small trainable modules that
+together produce change-conditioned SAM inputs; and (iii) a SAM-family mask
+decoder that emits the final mask.
+
+\subsection{Encoder / Decoder Registry}
+\label{sec:registry}
+
+All encoders share a common patch-ViT interface: they return, for each input
+image, multi-scale patch-token sequences. We register 16 encoder configurations
+drawn from five families (Table~\ref{tab:encoders}): the original DINOv2,
+DINOv2-with-registers, the remote-sensing-distilled DINOv2-RS series, DINOv3,
+and DINOv3-sat. Decoders follow a parallel convention: for the SAM family, the
+mask decoder and prompt encoder are loaded together and adapted to consume the
+patch-resolution feature maps and dense prompts produced by our bridge. The
+registry enables any encoder $\times$ any decoder combination to be instantiated
+from a single configuration string, which is essential for the sweep in
+Section~\ref{sec:experiments}.
+
+\subsection{Cross-Change Attention}
+\label{sec:crosschange}
+
+Let $Z^{(r)}, Z^{(t)} \in \mathbb{R}^{S\times d}$ denote the last-layer patch
+tokens of the reference and target images, where $S = HW/p^2$ for ViT patch
+size $p$. We project each into query, key, and value spaces and compute a
+cross-attention map with a \emph{learned} log-temperature $\tau = e^{\lambda}$:
+\begin{equation}
+  A = \mathrm{softmax}\!\left(\frac{1}{\tau}\, Q^{(r)} (K^{(t)})^\top\right),
+  \qquad Z^{(c)} = \mathrm{LN}\!\left(Z^{(r)} + W_o\, A\, V^{(t)}\right).
+\end{equation}
+The change tokens $Z^{(c)}$ carry per-patch information about where, in the
+target view, each reference patch attends --- a direct signal for
+\emph{displacement} and \emph{disappearance} events. We additionally extract
+the diagonal similarity $s_i = \langle Q^{(r)}_i, K^{(t)}_i \rangle / \tau$ and
+define a patch-level change map $c_i = \sigma(1 - s_i)$ that we supervise
+auxiliarily (see \S\ref{sec:loss}). The learnable temperature is critical:
+early training benefits from smoother attention (large $\tau$), while mature
+networks sharpen the map; learning $\lambda$ removes one hyperparameter.
+
+\subsection{Bridge v2}
+\label{sec:bridge}
+
+Bridge v2 turns DINO multi-scale features $\{F_\ell\}_{\ell=1}^4$ and change
+tokens $Z^{(c)}$ into the three inputs SAM expects: a $256{\times}64{\times}64$
+image embedding $E$, a dense prompt embedding $P$ of the same shape, and a
+pyramid of high-resolution features for SAM's hierarchical mask head.
+
+\begin{itemize}
+  \item \textbf{Per-scale projection.} Each $F_\ell$ is linearly projected to
+    $d=256$, bilinearly upsampled to $64\times 64$, and passed through two
+    residual 3$\times$3 convolutions.
+  \item \textbf{FPN-style lateral fusion.} Top-down lateral connections fuse
+    coarser scales into finer ones.
+  \item \textbf{Transformer refinement.} Two self-attention layers with
+    norm-first encoders sharpen the fused map.
+  \item \textbf{Dense-prompt head.} The change tokens $Z^{(c)}$ are reshaped to
+    $256{\times}64{\times}64$ and added to the (projected) fused features to
+    produce $P$. This repurposes SAM's normally-unused dense-prompt slot as a
+    change conditioning signal.
+  \item \textbf{High-resolution tap.} Two additional projections emit 64-d
+    features at $2\times$ resolution and 32-d features at $4\times$, matching
+    SAM-2.1's hierarchical decoder interface.
+\end{itemize}
+
+Bridge v2 contributes $\sim$11~M parameters, the dominant share of the
+trainable budget.
+
+\subsection{Loss}
+\label{sec:loss}
+
+We supervise four objectives jointly:
+\begin{equation}
+  \mathcal{L} = w_\text{bce}\,\mathcal{L}_\text{BCE}^\text{OHEM}
+              + w_\text{dice}\,\mathcal{L}_\text{Dice}
+              + w_\text{iou}\,\mathcal{L}_\text{IoU}
+              + w_\text{lat}\,\mathcal{L}_\text{lat}.
+\end{equation}
+$\mathcal{L}_\text{BCE}^\text{OHEM}$ is pixel-wise BCE restricted to the
+hardest $\rho=70\%$ pixels per batch; $\mathcal{L}_\text{Dice}$ is the
+standard soft Dice loss; $\mathcal{L}_\text{IoU}$ is MSE between SAM's
+predicted IoU and the ground-truth IoU of the thresholded prediction;
+$\mathcal{L}_\text{lat}$ is BCE between the patch-level change map $c$ and the
+pooled ground-truth mask (threshold $>$~0.3). Default weights are
+$w_\text{bce}=w_\text{dice}=1.0$, $w_\text{iou}=0.5$, $w_\text{lat}=0.2$; the
+latent temperature is 0.03 (see \S\ref{sec:ablations}).
+
+\subsection{Training details}
+
+We train with AdamW (weight decay 0.01), a linear warmup followed by cosine
+decay over 50 epochs, and early stopping with patience 10. The DINO encoder
+is always frozen; the SAM decoder is frozen by default and optionally
+fine-tuned at 0.1$\times$ the main learning rate (\S\ref{sec:ablations}).
+Geometric augmentations are applied consistently to reference, target, and
+mask (random crop, scale jitter 0.75--1.25, horizontal/vertical flips, 90$^\circ$
+rotations, elastic distortion); photometric augmentations are applied
+independently to reference and target (colour jitter, Gaussian blur, random
+grayscale). We also randomly swap reference and target to enforce symmetry.
+At test time we optionally average predictions over 8 geometric
+transformations (4 flips + 4 rotations).

@@ -1,0 +1,92 @@
+% bmvc2k.sty - Minimal BMVC-compatible style placeholder
+%
+% This is a lightweight style file that approximates the BMVC paper format
+% (9 pages + references, single column, specific margins).
+%
+% For the official camera-ready submission, DOWNLOAD THE OFFICIAL TEMPLATE:
+%   https://bmvc2024.org/info/authorguide/  (or the year you are submitting to)
+% and replace this file. The official template adds paper ID, blind review
+% handling, etc.
+
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{bmvc2k}[2024/04/24 BMVC-compatible paper style]
+
+\RequirePackage[a4paper,
+                left=22.5mm, right=22.5mm,
+                top=28mm, bottom=32mm,
+                headheight=14pt, headsep=10pt,
+                footskip=25pt,
+                ]{geometry}
+
+\RequirePackage{times}
+\RequirePackage{helvet}
+\RequirePackage{courier}
+\RequirePackage{amsmath,amssymb}
+\RequirePackage{microtype}
+\RequirePackage{graphicx}
+\RequirePackage[numbers]{natbib}
+\RequirePackage{url}
+\RequirePackage{hyperref}
+\RequirePackage{caption}
+\RequirePackage{subcaption}
+\RequirePackage{xcolor}
+\RequirePackage{fancyhdr}
+\RequirePackage{booktabs}
+\RequirePackage{multirow}
+\RequirePackage{array}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\setlength{\columnsep}{6mm}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+% Heading styles — BMVC uses sans-serif for section headings
+\renewcommand{\section}{\@startsection{section}{1}{\z@}%
+  {-12pt \@plus -2pt \@minus -2pt}%
+  {6pt}%
+  {\normalfont\large\bfseries\sffamily}}
+\renewcommand{\subsection}{\@startsection{subsection}{2}{\z@}%
+  {-10pt \@plus -2pt \@minus -2pt}%
+  {4pt}%
+  {\normalfont\normalsize\bfseries\sffamily}}
+\renewcommand{\subsubsection}{\@startsection{subsubsection}{3}{\z@}%
+  {-8pt \@plus -2pt \@minus -2pt}%
+  {2pt}%
+  {\normalfont\normalsize\itshape\sffamily}}
+
+% Title block
+\renewcommand{\maketitle}{%
+  \begin{center}%
+    {\LARGE\bfseries\sffamily \@title \par}%
+    \vspace{12pt}%
+    {\large \@author \par}%
+    \vspace{6pt}%
+    \ifdefined\thebmvcaffiliation\thebmvcaffiliation\fi%
+    \vspace{18pt}%
+  \end{center}%
+}
+
+% Abstract styling
+\renewenvironment{abstract}{%
+  \begin{quote}\small\bfseries\sffamily Abstract\\*[4pt]\rmfamily\mdseries
+}{%
+  \end{quote}\vspace{6pt}
+}
+
+% Hyperref setup
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=magenta,
+  urlcolor=blue,
+}
+
+% Caption styling
+\captionsetup{labelfont=bf,font=small}
+
+\endinput

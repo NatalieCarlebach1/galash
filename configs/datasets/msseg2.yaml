@@ -1,0 +1,86 @@
+# MSSEG-2 new-MS-lesion detection — fair-comparison config.
+#
+# References tracked:
+#   • Base SOTA: DEFUSE-MS (MICCAI 2025)  — F1 0.65, Dice 0.55
+#     https://papers.miccai.org/miccai-2025/0221-Paper1815.html
+#   • Open code that most replicable SOTA nnU-Net variants derive from:
+#     https://github.com/ander-elkoroaristizabal/nnunet-ms-segmentation
+#     (best variant: nnUNetTrainerExtremeOversamplingEarlyStoppingLowLR)
+#   • CIB (MICCAI 2025) — +12.82 % F1 gain over nnU-Net baselines
+#     https://papers.miccai.org/miccai-2025/0637-Paper0702.html
+#
+# nnU-Net defaults ported to our 2D DINOv2+SAM pipeline:
+#   initial_lr          = 1e-3   (LowLR variant; base nnU-Net uses 1e-2)
+#   weight_decay        = 3e-5
+#   num_epochs          = 1000 (capped by early-stop patience 100)
+#   num_iterations      = 250 / epoch  (≈ 1 batch per training subject-slice-pair)
+#   oversample_foreground_percent = 1.0   ("extreme" variant — every patch has lesion)
+#   loss                = Dice + CE  (nnU-Net default)
+#   augmentation set    = SpatialTransform + MirrorTransform + GaussianNoise +
+#                         GaussianBlur + BrightnessMultiplicative + ContrastAug +
+#                         SimulateLowResolution + GammaTransform×2
+#   preprocessing       = already done by MSSEG-2 organisers (registration to
+#                         intermediate space, skull-strip, bias-field, z-score per
+#                         brain). Our preparer converts axial slices to 8-bit PNG
+#                         after robust percentile normalisation.
+#
+# Caveat: the published SOTA trains a 3-D U-Net at 128³ patches. Galash is 2-D
+# (axial slices), so we CANNOT match the 3-D context directly — instead we:
+#   - match LR / WD / epoch budget / loss / oversampling exactly,
+#   - approximate 3-D full-res with 512² axial crops,
+#   - report the 2-D vs 3-D gap honestly in the paper's discussion.
+
+dataset: msseg2
+img_size: 512
+test_img_size: 512
+
+normalization:
+  mean: [0.485, 0.456, 0.406]   # ImageNet (DINOv2 expects this)
+  std:  [0.229, 0.224, 0.225]
+
+# Augmentations matched to nnU-Net defaults
+# (nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py:673-702)
+augmentations:
+  # Spatial (nnU-Net's SpatialTransform collapses rotate+scale+elastic).
+  - {op: random_rotate,   degrees: 30, prob: 0.2}
+  - {op: random_scale,    scales: [0.85, 1.15], prob: 0.2}
+  - {op: random_crop,     size: 512, cat_max_ratio: 1.0}
+
+  # MirrorTransform (axes 0,1,2 → we apply 2-D equivalents)
+  - {op: random_flip,     direction: horizontal, prob: 0.5}
+  - {op: random_flip,     direction: vertical,   prob: 0.5}
+
+  # Intensity (batchgenerators noise / blur / brightness / contrast)
+  - {op: gaussian_blur,   radius_range: [0.5, 1.0], prob: 0.2, independent: true}
+  - {op: photometric_distortion, brightness_delta: 25,
+     contrast_range: [0.75, 1.25], saturation_range: [1.0, 1.0], hue_delta: 0}
+
+  # Temporal swap: MS new lesions are asymmetric (time-2 only), so
+  # DO NOT swap (would invert the label).
+  # (explicitly omitted — see fair-comparison promise in the README)
+
+training:
+  batch: 8
+  epochs: 1000
+  patience: 100            # matches nnUNetTrainerEarlyStopping
+  min_delta: 0.0
+  lr: 1.0e-3               # LowLR variant
+  warmup: 3
+  weight_decay: 3.0e-5
+  decoder_lr_scale: 0.1
+  finetune_decoder: true   # DINOv2 frozen, SAM decoder finetuned
+  tta: false               # nnU-Net / DEFUSE-MS SOTA numbers do NOT use TTA
+  # Foreground oversampling: at least X% of slices per batch must contain lesion.
+  oversample_foreground_percent: 1.0
+
+reference_methods:
+  - {name: DEFUSE-MS,  year: 2025, f1_lesion: 0.65, dice: 0.55, url: "https://papers.miccai.org/miccai-2025/0221-Paper1815.html"}
+  - {name: CIB,        year: 2025, f1_gain_over_nnunet: 0.1282, dice_gain: 0.0401, url: "https://papers.miccai.org/miccai-2025/0637-Paper0702.html"}
+  - {name: nnUNet-ExtremeOversamplingLowLR, year: 2024, url: "https://github.com/ander-elkoroaristizabal/nnunet-ms-segmentation"}
+
+# Metrics to report (lesion-wise first, then voxel-wise — matches MSSEG-2 official)
+report_metrics:
+  - lesion_f1
+  - lesion_sensitivity
+  - lesion_ppv
+  - voxel_dice

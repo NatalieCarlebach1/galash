@@ -1,0 +1,63 @@
+# ISBI 2015 longitudinal MS lesion segmentation — fair-comparison config.
+#
+# References tracked:
+#   • SOTA: Temporal Difference Weighting (MICCAI LDTM 2024)
+#     https://arxiv.org/abs/2409.13416     Dice 0.75 , lesion-F1 0.74
+#     code: https://github.com/MIC-DKFZ/Longitudinal-Difference-Weighting
+#   • Training pipeline: LongiSeg
+#     https://github.com/MIC-DKFZ/LongiSeg  (nnU-Net extension for longitudinal)
+#   • nnU-Net baseline: Dice 0.742, lesion-F1 0.713
+#
+# nnU-Net defaults used by LongiSeg / TDW:
+#   initial_lr          = 1e-2   (base nnU-Net — TDW keeps this)
+#   weight_decay        = 3e-5
+#   num_epochs          = 1000  (early-stop off by default in nnU-Net; add patience)
+#   num_iterations      = 250 / epoch
+#   oversample_foreground_percent = 0.33   (base nnU-Net default)
+#   loss                = Dice + CE
+#   augmentations       = nnU-Net default set (see msseg2.yaml)
+#
+# The ISBI-2015 labels contain manual per-timepoint lesion masks (2 raters).
+# We derive new-lesion CD labels as (lesion_t+1 AND NOT lesion_t).  The rater
+# used for ground truth: rater-1 (mask1), matching TDW's protocol.
+
+dataset: isbi_ms
+img_size: 512
+test_img_size: 512
+
+normalization:
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+augmentations:
+  - {op: random_rotate,   degrees: 30, prob: 0.2}
+  - {op: random_scale,    scales: [0.85, 1.15], prob: 0.2}
+  - {op: random_crop,     size: 512, cat_max_ratio: 1.0}
+  - {op: random_flip,     direction: horizontal, prob: 0.5}
+  - {op: random_flip,     direction: vertical,   prob: 0.5}
+  - {op: gaussian_blur,   radius_range: [0.5, 1.0], prob: 0.2, independent: true}
+  - {op: photometric_distortion, brightness_delta: 25,
+     contrast_range: [0.75, 1.25], saturation_range: [1.0, 1.0], hue_delta: 0}
+
+training:
+  batch: 8
+  epochs: 1000
+  patience: 100
+  min_delta: 0.0
+  lr: 1.0e-2               # base nnU-Net LR (TDW keeps this)
+  warmup: 3
+  weight_decay: 3.0e-5
+  decoder_lr_scale: 0.1
+  finetune_decoder: true
+  tta: false
+  oversample_foreground_percent: 0.33
+
+reference_methods:
+  - {name: TDW,     year: 2024, dice: 0.75,  f1_lesion: 0.74,  url: "https://arxiv.org/abs/2409.13416"}
+  - {name: nnUNet,  year: 2024, dice: 0.742, f1_lesion: 0.713}
+  - {name: FreeSurfer-Samseg, year: 2021}
+
+report_metrics:
+  - lesion_f1
+  - voxel_dice
+  - voxel_iou
