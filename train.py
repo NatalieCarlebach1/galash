@@ -390,6 +390,8 @@ def main():
     p.add_argument("--search_threshold", action="store_true",
                    help="At final test eval, sweep threshold in [0.30, 0.70] on val and "
                         "apply the best to test. Typically +0.2-0.4 F1 on LEVIR/CDD.")
+    p.add_argument("--seed", type=int, default=None,
+                   help="Random seed for reproducibility (sets torch, numpy, random).")
     args = p.parse_args()
 
     # ── apply YAML config BEFORE anything downstream uses the args ──
@@ -417,6 +419,14 @@ def main():
             args.tta = True
         print(f"[config] img_size={args.img_size} batch={args.batch} epochs={args.epochs} "
               f"lr={args.lr} patience={args.patience} finetune={args.finetune_decoder} tta={args.tta}")
+
+    if args.seed is not None:
+        import random, numpy as np
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+        torch.backends.cudnn.deterministic = True
 
     use_amp = not args.no_amp
 

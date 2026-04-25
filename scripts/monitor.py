@@ -23,7 +23,7 @@ import sys
 import time
 from collections import defaultdict
 
-ROOT = '/home/nfs/tals/galash'
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNS = os.path.join(ROOT, 'runs')
 LOGS = os.path.join(ROOT, 'logs/slurm')
 
@@ -145,7 +145,16 @@ def snapshot(tag_filter=None):
     squeue = squeue_rows()
     # find run directories
     rows = []
-    for run_dir in sorted(glob.glob(os.path.join(RUNS, '*_20260424_*'))):
+    all_csv = glob.glob(os.path.join(RUNS, '**', 'log.csv'), recursive=True)
+    # Build a set of "run dirs" — the parent of each log.csv or grandparent if needed
+    seen_run_dirs = set()
+    for csv in all_csv:
+        parent = os.path.dirname(csv)          # e.g. runs/seeds/seed42_levir_cd/20260425_.../
+        grandparent = os.path.dirname(parent)  # e.g. runs/seeds/seed42_levir_cd/
+        # Use grandparent if it looks like a named run, otherwise parent
+        candidate = grandparent if re.search(r'seed|pd_|enc_|dec_|cheap|abl|partner', os.path.basename(grandparent)) else parent
+        seen_run_dirs.add(candidate)
+    for run_dir in sorted(seen_run_dirs):
         run_name = os.path.basename(run_dir)
         if tag_filter and tag_filter not in run_name:
             continue
