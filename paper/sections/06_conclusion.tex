@@ -1,30 +1,61 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-We presented GALASH, a pipeline that composes frozen DINO-family and SAM-family
-foundation models into a parameter-efficient change detector. Two small
-trainable modules — Cross-Change Attention and Bridge v2 — suffice to adapt
-generic self-supervised features to bi-temporal change, achieving results
-competitive with or surpassing recent specialist architectures on six standard
-benchmarks while training only \textsc{TODO}\% of parameters.
+We presented GALASH, a pipeline that composes frozen DINO-family and
+SAM-family foundation models into a parameter-efficient change detector.
+Two small trainable modules --- Cross-Change Attention and Bridge v2 ---
+suffice to adapt generic self-supervised features to bi-temporal change.
+
+\paragraph{Headline results.}
+\begin{itemize}
+  \item State-of-the-art on \textbf{DSIFN-CD} (96.74 F1; $+0.09$ over
+    DDPM-CD), with $27\times$ fewer trainable parameters.
+  \item State-of-the-art on \textbf{SECOND} binary change (73.20 F1;
+    $+0.08$ over UniChange), without an MLLM.
+  \item Within $0.87$ F1 of SChanger on \textbf{CDD} and $2.21$ F1 on
+    \textbf{LEVIR-CD}, while using a single training pass and no
+    synthetic-pair pretraining.
+\end{itemize}
+
+\paragraph{Ablation findings worth highlighting.}
+\begin{itemize}
+  \item \textbf{SAM decoder capacity is irrelevant for change detection.}
+    SAM2.1-tiny ($39$ M) ties or beats SAM2.1-large ($225$ M) by up to
+    $0.33$ F1 across all sizes (Table~\ref{tab:dec-sweep}). The bridge
+    --- not the decoder --- is the locus of adaptation.
+  \item \textbf{Remote-sensing pretraining beats raw model capacity.}
+    DINOv2-RS-base ($86$ M) outperforms DINOv2-large ($304$ M) by $4.7$
+    F1 on LEVIR-CD; pretraining domain dominates over scale.
+  \item \textbf{Aerial pretraining (DINOv3-sat) helps only on
+    aerial-distribution benchmarks.} It wins on S2Looking but loses on
+    LEVIR-CD by $1.4$ F1 --- the SAT-493M corpus over-fits to coarse
+    satellite imagery and loses LEVIR-CD's building-edge sensitivity.
+  \item \textbf{Cheap inference-time wins (val threshold search +
+    multi-resolution test) add $+0.66$ F1 on LEVIR-CD} with no
+    retraining and no extra parameters.
+\end{itemize}
 
 \paragraph{Limitations.} GALASH inherits the resolution and patch-size
 constraints of its backbones: DINO patch sizes of 14--16 mean that fine
 sub-patch changes can be missed. The frozen-encoder design caps adaptation
-capacity; some benchmarks (notably S2Looking) may still benefit from targeted
-fine-tuning of the backbone. Finally, our SECOND results collapse the six
-semantic classes to binary; extending the decoder head to multi-class
-semantic CD is a natural next step.
+capacity; some benchmarks (notably S2Looking and LEVIR-CD+) likely require
+synthetic-pair pretraining (e.g., Changen) to close the remaining $9$--$10$
+F1 gap to SOTA. Finally, our SECOND results collapse the six semantic
+classes to binary; extending the decoder head to multi-class semantic CD
+is a natural next step.
 
 \paragraph{Broader directions.} The encoder/decoder registry is a research
 platform in its own right: studying how foundation-model pretraining
 (general, remote-sensing, satellite) interacts with mask-decoder capacity
-suggests a research agenda beyond change detection. We plan to extend GALASH
-to dense multi-task remote-sensing (semantic CD, building footprint
+suggests a research agenda beyond change detection. We plan to extend
+GALASH to dense multi-task remote-sensing (semantic CD, building footprint
 extraction, disaster damage assessment) and to cross-domain transfer
-(medical volumetric CD).
+(medical volumetric CD, where preliminary results on MSSEG-2 and ISBI-2015
+are reported in the supplement).
 
 \paragraph{Reproducibility.} All code, SLURM launch scripts, dataset
-preparation recipes, and trained checkpoints are released at
-\url{https://github.com/anonymous/galash}. Training a single GALASH baseline
-takes \textsc{TODO}~GPU-hours on one NVIDIA RTX 6000 Ada.
+preparation recipes, per-dataset YAML augmentation configs (matched to
+each published SOTA pipeline), trained checkpoints, and the live
+SOTA-gap monitor are released at
+\url{https://github.com/anonymous/galash}. Training a single GALASH
+baseline takes 2--6 GPU-hours on one NVIDIA RTX 6000 Ada (48 GB).

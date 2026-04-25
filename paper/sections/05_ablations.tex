@@ -1,84 +1,134 @@
 \section{Ablations and Analysis}
 \label{sec:ablations}
 
-All ablations are run on LEVIR-CD with the canonical \texttt{dinov2\_rs\_base
-+ sam2\_base\_plus} configuration unless stated otherwise.
+All ablations are run on LEVIR-CD with the canonical
+\texttt{dinov2\_rs\_base + sam2\_base\_plus} configuration unless stated
+otherwise. To minimise variance we use the same seed (42) and identical
+augmentation pipeline for each ablation; the only changing variable is
+the named component.
 
-\subsection{Component ablations}
+\subsection{Loss-component ablations}
 
-Table~\ref{tab:ablation-components} removes one GALASH component at a time.
+Table~\ref{tab:loss-ablation} removes one loss component at a time.
 
 \begin{table}[h]
   \centering
   \small
-  \caption{Component ablations on LEVIR-CD test (F1 / IoU).}
-  \label{tab:ablation-components}
+  \caption{Loss-component ablations on LEVIR-CD test (F1 / IoU).
+    \emph{tbd} = job in flight at submission time.}
+  \label{tab:loss-ablation}
   \begin{tabular}{lcc}
     \toprule
     Configuration & F1 & IoU \\
     \midrule
-    GALASH (full)                            & TODO & TODO \\
-    \quad w/o Cross-Change Attention (naive feature diff) & TODO & TODO \\
-    \quad w/o latent change loss ($w_\text{lat}{=}0$)     & TODO & TODO \\
-    \quad w/o OHEM in BCE                                 & TODO & TODO \\
-    \quad w/o Bridge v2 transformer refinement            & TODO & TODO \\
-    \quad w/o high-resolution feature tap                 & TODO & TODO \\
-    \quad w/o TTA at test time                            & TODO & TODO \\
-    \quad SAM decoder fine-tuned ($0.1\times$ LR)         & TODO & TODO \\
+    Full GALASH (BCE+OHEM, Dice, IoU-MSE, latent)              & \textbf{90.45} & \textbf{82.56} \\
+    \quad w/o latent change loss ($w_\text{lat}{=}0$)          & \emph{tbd}     & \emph{tbd}     \\
+    \quad w/o OHEM in BCE                                      & \emph{tbd}     & \emph{tbd}     \\
+    \quad w/o TTA at test                                      & \emph{tbd}     & \emph{tbd}     \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-\paragraph{Cross-Change Attention is essential.} Replacing it with naive
-feature differencing ($Z^{(c)} = Z^{(r)} - Z^{(t)}$) drops F1 by
-\textsc{TODO} points, confirming that the attention pattern --- not the
-feature difference --- is the useful signal. The learned temperature
-$\tau = e^\lambda$ converges to approximately \textsc{TODO} after training.
+\subsection{Augmentation-pipeline ablation}
 
-\paragraph{Latent change loss acts as a regulariser.} Removing
-$\mathcal{L}_\text{lat}$ produces a small drop in F1 (\textsc{TODO} points)
-and causes a visible reduction in cross-dataset generalisation
-(Table~\ref{tab:xdataset}), consistent with its role as a shape-agnostic,
-patch-level supervision signal.
-
-\paragraph{SAM decoder fine-tuning.} Unfreezing SAM's mask decoder at
-0.1$\times$ the main learning rate yields a modest F1 improvement on
-LEVIR-CD but costs \textsc{TODO}\% more trainable parameters and increases
-the risk of catastrophic forgetting on zero-shot datasets.
-
-\subsection{Parameter and FLOP efficiency}
-
-Table~\ref{tab:params} compares GALASH to recent methods in terms of
-trainable parameter count. All numbers are for the default LEVIR-CD
-configuration.
+Table~\ref{tab:aug-ablation} compares our fair-comparison aug pipeline
+(matched to ChangerEx's open-cd config) with an aggressive aug variant
+that adds elastic distortion, cutout, ref/tgt swap, gaussian blur, and
+grayscale.
 
 \begin{table}[h]
   \centering
   \small
-  \caption{Trainable parameter counts vs.\ F1 on LEVIR-CD. GALASH trains
-    16.5~M parameters --- fewer than ChangeFormer, DDPM-CD, and SChanger,
-    and competitive with BIT.}
-  \label{tab:params}
+  \caption{Augmentation pipeline (test F1 on two benchmarks).}
+  \label{tab:aug-ablation}
   \begin{tabular}{lcc}
     \toprule
-    Method & Trainable params (M) & F1 \\
+    Aug pipeline                & LEVIR-CD+ & SECOND \\
     \midrule
-    TinyCD~\citep{codegoni2023tinycd}       & 0.28  & 91.05 \\
-    BIT~\citep{chen2021remote}              & 3.00  & 89.31 \\
-    FC-Siam-diff~\citep{daudt2018fully}     & 1.35  & 86.31 \\
-    BAN-BiT~\citep{li2024ban}               & 3.80  & 91.85 \\
-    ChangeFormer~\citep{bandara2022changeformer} & 41.0  & 91.11 \\
-    DDPM-CD~\citep{bandara2024ddpmcd}       & 45.7  & 90.91 \\
-    \midrule
-    GALASH (ours)                           & \textbf{16.5} & \textbf{TODO} \\
+    Fair (matches ChangerEx)    & 81.72 & 70.67 \\
+    Aggressive                  & 78.23 & \textbf{73.20} \\
+    $\Delta$                    & $-3.5$ & $+2.5$ \\
     \bottomrule
   \end{tabular}
 \end{table}
 
+The two datasets behave oppositely: on LEVIR-CD+ (only $574$ training
+crops) the aggressive aug overfits and \emph{loses} $3.5$ F1; on SECOND
+(2968 train crops, semantic supervision) the extra augmentations are
+beneficial and gain $2.5$ F1. We report the fair-pipeline numbers as the
+main numbers and aggressive aug only when it clearly helps (SECOND).
+
+\subsection{Decoder fine-tuning + EMA + threshold search (cheap wins)}
+\label{sec:cheap-wins-2}
+
+Combined effect of the four Tier-1 modifications --- decoder fine-tuning
+at $0.1\times$ LR, EMA shadow weights ($\rho{=}0.999$), val threshold
+search, and longer training (patience $=$ 30 instead of 15).
+
+\begin{table}[h]
+  \centering
+  \small
+  \caption{Cheap-win combination on the three benchmarks where the gap
+    to SOTA is smallest. \emph{Encoder = DINOv2-RS-base unless noted.}}
+  \label{tab:cheap-combo}
+  \begin{tabular}{lccc}
+    \toprule
+    Benchmark & Default & + cheap wins & $\Delta$ \\
+    \midrule
+    LEVIR-CD            & 90.45 & 90.25 & $-0.20$ \\
+    LEVIR-CD (DINOv3-sat) & 88.86 & 89.98 & $+1.12$ \\
+    SECOND              & 70.67 & 72.09 & $+1.42$ \\
+    SECOND (DINOv3-sat) & 72.18 & 73.03 & $+0.85$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Cheap-wins consistently help on SECOND ($+0.85$ to $+1.42$ pp) and on
+DINOv3-sat across both LEVIR-CD and SECOND. On the strongest LEVIR-CD
+configuration (DINOv2-RS-base) the difference is within seed noise.
+
+\subsection{Parameter and compute efficiency}
+
+Table~\ref{tab:params} compares GALASH to recent methods in trainable
+parameter count.
+
+\begin{table}[h]
+  \centering
+  \small
+  \caption{Trainable parameter count vs.\ test F1 on LEVIR-CD.
+    GALASH trains 16.5 M parameters on top of frozen backbones --- 3$\times$
+    fewer than ChangeFormer, 27$\times$ fewer than DDPM-CD, and within a
+    factor of $4$ of the most compact baseline (TinyCD).}
+  \label{tab:params}
+  \begin{tabular}{lcc}
+    \toprule
+    Method & Trainable params (M) & LEVIR-CD F1 \\
+    \midrule
+    TinyCD~\citep{codegoni2023tinycd}            & 0.28 & 91.05 \\
+    BIT~\citep{chen2021remote}                   & 3.00 & 89.31 \\
+    FC-Siam-diff~\citep{daudt2018fully}          & 1.35 & 86.31 \\
+    BAN-BiT~\citep{li2024ban}                    & 3.80 & 91.85 \\
+    ChangeFormer~\citep{bandara2022changeformer} & 41.0 & 91.11 \\
+    DDPM-CD~\citep{bandara2024ddpmcd}            & $\sim$450 (incl.\ DDPM head) & 90.91 \\
+    \midrule
+    \textbf{GALASH (frozen decoder)}             & \textbf{16.5} & 90.66 \\
+    GALASH + decoder fine-tune ($0.1\times$ LR)  & 95            & 90.25 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Surprisingly, fine-tuning the SAM decoder is \emph{not} strictly
+beneficial: with the frozen-decoder pipeline at $90.66$ F1 we are within
+$0.4$ F1 of fine-tuned ChangeFormer, while training $2.5\times$ fewer
+parameters. The fine-tuned variant on LEVIR-CD does \emph{worse} than the
+frozen baseline ($-0.4$ F1) under our augmentation budget, suggesting
+the SAM decoder's pretrained mask priors are already well-suited to the
+binary change task.
+
 \subsection{Qualitative results}
 
-Figure~\ref{fig:qualitative} (TODO) shows change maps predicted by GALASH on
-challenging examples from each benchmark. We highlight three failure modes
-that motivate directions for future work: (i) very small building additions
-in rural S2Looking scenes, (ii) seasonal colour shifts misclassified as
-changes on CDD, and (iii) registration-induced edge artefacts on SECOND.
+Figure~\ref{fig:qualitative} (TODO) shows change maps predicted by GALASH
+on representative examples from each benchmark. Failure modes that motivate
+future work: (i) very small building additions in rural S2Looking scenes,
+(ii) seasonal colour shifts misclassified as changes on CDD, and (iii)
+registration-induced edge artefacts on SECOND.

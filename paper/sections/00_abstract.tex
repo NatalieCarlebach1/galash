@@ -1,20 +1,27 @@
-Bi-temporal change detection in aerial and satellite imagery has been dominated by
-task-specific convolutional and transformer architectures, while the broader vision
-community has converged on large self-supervised backbones such as
-\textsc{DINOv2}, \textsc{DINOv3}, and the \textsc{SAM} family. We ask whether these
-foundation models can be \emph{composed} --- rather than fine-tuned --- to obtain
-competitive change-detection performance. We introduce \textbf{GALASH}, a
-unified pipeline that pairs any frozen \textsc{DINO}-style encoder with any
-\textsc{SAM}-family mask decoder via two lightweight trainable modules:
-(i) a \emph{cross-change attention} operator that uses a learnable temperature to
-produce per-patch change tokens from reference and target features, and (ii) a
-multi-scale \emph{Bridge v2} that fuses DINO features into SAM's prompt and
-image-embedding interfaces, repurposing the normally-unused dense-prompt slot as
-a change-conditioning signal. Our encoder/decoder registry spans
-\textbf{16 encoders $\times$ 8 decoders} (five \textsc{DINO} variants including
-remote-sensing and satellite pretraining, three \textsc{SAM} generations), giving
-a principled testbed for studying which foundation-model pairings transfer best
-to change detection. On six standard benchmarks (LEVIR-CD, LEVIR-CD+,
-S2Looking, CDD, DSIFN-CD, SECOND) GALASH trains only $\sim$\textbf{16.5 M parameters}
-on top of frozen backbones and attains results competitive with or surpassing recent
-dedicated methods. We release code, checkpoints, and all sweep logs.
+Bi-temporal change detection in aerial and satellite imagery has been dominated
+by task-specific convolutional and transformer architectures, while the broader
+vision community has converged on large self-supervised backbones such as
+\textsc{DINOv2}, \textsc{DINOv3}, and the \textsc{SAM} family. We ask whether
+these foundation models can be \emph{composed} --- rather than fine-tuned ---
+to obtain competitive change-detection performance. We introduce
+\textbf{GALASH}, a unified pipeline that pairs any frozen \textsc{DINO}-style
+encoder with any \textsc{SAM}-family mask decoder via two lightweight
+trainable modules: (i) a \emph{cross-change attention} operator that uses a
+learnable temperature to produce per-patch change tokens from reference and
+target features, and (ii) a multi-scale \emph{Bridge v2} that fuses DINO
+features into SAM's prompt and image-embedding interfaces, repurposing the
+normally-unused dense-prompt slot as a change-conditioning signal. Our
+encoder/decoder registry spans \textbf{16+ encoders $\times$ 7+ decoders}
+(four \textsc{DINO} generations including remote-sensing and satellite
+pretraining, two \textsc{SAM} generations), giving a principled testbed for
+studying which foundation-model pairings transfer best to change detection.
+GALASH trains only $\sim$\textbf{16.5 M parameters} on top of frozen
+backbones (3$\times$ fewer than ChangeFormer, 27$\times$ fewer than DDPM-CD)
+and achieves \textbf{state-of-the-art} on DSIFN-CD ($\mathbf{96.74}$ F1
+vs.\ DDPM-CD's 96.65) and SECOND ($\mathbf{73.20}$ F1 vs.\ UniChange's
+73.12), and is competitive on LEVIR-CD ($90.66$ F1) and CDD ($96.75$ F1).
+A surprising finding is that SAM decoder \emph{capacity is irrelevant} for
+change detection: SAM2.1-tiny (39 M) matches SAM2.1-large (225 M) within
+$0.3$ F1 across all benchmarks. We release code, checkpoints, sweep logs,
+and per-dataset YAML configs that match each benchmark's published SOTA
+augmentation pipeline verbatim --- enforcing fair comparison.

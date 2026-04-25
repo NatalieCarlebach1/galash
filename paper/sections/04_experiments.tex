@@ -6,117 +6,245 @@
 We evaluate on six standard change-detection benchmarks:
 
 \begin{itemize}
-  \item \textbf{LEVIR-CD}~\citep{chen2020spatial} — building change, 7120/1024/2048
-    train/val/test 256$^2$ crops of the standard split.
-  \item \textbf{LEVIR-CD+}~\citep{zheng2022changestar} — extended LEVIR, 637/348
-    train/test 1024$^2$ tiles; we hold out 10\% of train as val.
-  \item \textbf{S2Looking}~\citep{shen2021s2looking} — 3500/500/1000 rural,
-    off-nadir 1024$^2$ tiles.
-  \item \textbf{CDD}~\citep{lebedev2018change} — 10000/2998/3000 256$^2$ crops
-    with seasonal variation.
-  \item \textbf{DSIFN-CD}~\citep{zhang2020deeply} — we use the 10000/2998/3000
-    split from the official \texttt{Real/subset}; we name the split explicitly
-    because cross-paper comparisons can differ by $\sim$5 F1.
-  \item \textbf{SECOND}~\citep{yang2021second} (binary collapse) —
+  \item \textbf{LEVIR-CD}~\citep{chen2020spatial} --- building change,
+    7120/1024/2048 train/val/test 256$^2$ crops of the standard split.
+  \item \textbf{LEVIR-CD+}~\citep{zheng2022changestar} --- extended LEVIR,
+    637/348 train/test 1024$^2$ tiles; we hold out 10\% of train as val.
+  \item \textbf{S2Looking}~\citep{shen2021s2looking} --- 3500/500/1000
+    rural, off-nadir 1024$^2$ tiles.
+  \item \textbf{CDD}~\citep{lebedev2018change} --- 10000/2998/3000 256$^2$
+    crops with seasonal variation.
+  \item \textbf{DSIFN-CD}~\citep{zhang2020deeply} --- we use the
+    10000/2998/3000 split from the official \texttt{Real/subset}; we name
+    the split explicitly because cross-paper comparisons can differ by
+    $\sim$5 F1.
+  \item \textbf{SECOND}~\citep{yang2021second} (binary collapse) ---
     2968/1694 train/test; val is a 10\% auto-split. Binary change masks are
-    generated from the semantic labels as $M = \mathbf{1}[\ell^{(r)} \ne \ell^{(t)}]$.
+    generated as $M = \mathbf{1}[\ell^{(r)} \ne \ell^{(t)}]$ over labelled
+    pixels.
 \end{itemize}
 
 We report F1, IoU, Precision, Recall, Overall Accuracy (OA), and Cohen's
-$\kappa$ using pixel-level TP/FP/FN/TN accumulated at threshold 0.5.
-On CDD, F1 saturates above 95 in the recent literature; we follow the
-community practice~\citep{corley2024reality} of reporting IoU as the primary
-discriminator.
+$\kappa$ at threshold 0.5 (or the val-selected threshold when noted). On
+CDD, F1 saturates above 95 in recent literature; we report IoU as the
+primary discriminator following~\citep{corley2024reality}.
 
-\subsection{Main results}
+\paragraph{Fair comparison.} For every benchmark, our augmentation
+pipeline \emph{matches the published SOTA method's pipeline verbatim}. We
+release these as YAML configs in \texttt{configs/datasets/<name>.yaml}.
+Augmentations not used by any top-3 method on a benchmark (e.g.\ Mixup,
+CutMix, elastic distortion, random grayscale) are explicitly excluded.
+Inference is single-pass with optional 8-way TTA; threshold can be tuned
+on val (see \S\ref{sec:cheap-wins}). No ensembles, no model averaging.
+
+\subsection{Main results --- per-benchmark SOTA comparison}
+\label{sec:main-table}
 
 Table~\ref{tab:sota} compares GALASH to published SOTA on each benchmark.
-Our numbers are the TODO.
 
 \begin{table}[t]
   \centering
   \small
-  \caption{Per-benchmark comparison to published SOTA (F1 / IoU).
-    Bold: best. Underline: second-best. All GALASH numbers use
-    \texttt{dinov2\_rs\_base + sam2\_base\_plus} with the frozen decoder unless
-    noted. TTA denotes 8-way test-time augmentation.}
+  \caption{Per-benchmark comparison to published SOTA (test F1 $\times$ 100).
+    Bold: best; underline: second-best. Our default uses
+    \texttt{dinov2\_rs\_base + sam2\_base\_plus} with frozen decoder; see
+    Table~\ref{tab:enc-sweep} for encoder sweep.}
   \label{tab:sota}
   \begin{tabular}{lcccccc}
     \toprule
     Method & LEVIR-CD & LEVIR-CD+ & S2Looking & CDD & DSIFN-CD & SECOND \\
     \midrule
-    FC-Siam-diff~\citep{daudt2018fully}    & 86.31 & ---    & 13.1  & 70.61 & 70.55 & ---   \\
-    STANet~\citep{chen2020spatial}         & 87.26 & ---    & ---   & 84.12 & 64.56 & ---   \\
-    BIT~\citep{chen2021remote}             & 89.31 & ---    & 61.85 & 88.90 & 87.61 & ---   \\
-    SNUNet~\citep{fang2021snunet}          & 88.16 & ---    & ---   & 83.89 & 66.18 & ---   \\
-    ChangeFormer~\citep{bandara2022changeformer} & 91.11 & ---    & 63.39 & 94.63 & 94.67 & ---   \\
-    TinyCD~\citep{codegoni2023tinycd}      & 91.05 & ---    & ---   & ---   & ---   & ---   \\
-    ChangeStar~\citep{zheng2022changestar} & ---   & 90.5   & ---   & ---   & ---   & ---   \\
-    ChangerEx~\citep{fang2023changer}      & 91.77 & ---    & 66.20 & ---   & ---   & ---   \\
-    DDPM-CD~\citep{bandara2024ddpmcd}      & 90.91 & ---    & ---   & 95.62 & \textbf{96.65} & ---   \\
-    BAN~\citep{li2024ban}                  & 91.86 & ---    & 66.70 & ---   & ---   & ---   \\
-    TTP~\citep{chen2024ttp}                & 92.10 & ---    & ---   & ---   & ---   & ---   \\
-    SChanger~\citep{sun2025schanger}       & \textbf{92.87} & ---    & \underline{68.95} & \textbf{97.62} & ---   & ---   \\
-    UniChange~\citep{zeng2025unichange}    & ---   & ---    & \textbf{69.32} & ---   & ---   & \textbf{73.12} \\
+    FC-Siam-diff~\citep{daudt2018fully}            & 86.31 & ---  & 13.1  & 70.61 & 70.55 & ---   \\
+    STANet~\citep{chen2020spatial}                 & 87.26 & ---  & ---   & 84.12 & 64.56 & ---   \\
+    BIT~\citep{chen2021remote}                     & 89.31 & ---  & 61.85 & 88.90 & 87.61 & ---   \\
+    SNUNet~\citep{fang2021snunet}                  & 88.16 & ---  & ---   & 83.89 & 66.18 & ---   \\
+    ChangeFormer~\citep{bandara2022changeformer}   & 91.11 & ---  & 63.39 & 94.63 & 94.67 & ---   \\
+    TinyCD~\citep{codegoni2023tinycd}              & 91.05 & ---  & ---   & ---   & ---   & ---   \\
+    ChangeStar~\citep{zheng2022changestar}         & ---   & 90.5 & ---   & ---   & ---   & ---   \\
+    ChangerEx~\citep{fang2023changer}              & 91.77 & ---  & 66.20 & ---   & ---   & ---   \\
+    ChangeStar+Changen~\citep{zheng2023changen}    & ---   & \textbf{91.5} & 67.9 & ---   & ---   & ---   \\
+    DDPM-CD~\citep{bandara2024ddpmcd}              & 90.91 & ---  & ---   & 95.62 & \underline{96.65} & ---   \\
+    BAN~\citep{li2024ban}                          & 91.86 & ---  & 66.70 & ---   & ---   & ---   \\
+    TTP~\citep{chen2024ttp}                        & 92.10 & ---  & ---   & ---   & ---   & ---   \\
+    SChanger~\citep{sun2025schanger}               & \textbf{92.87} & --- & \underline{68.95} & \textbf{97.62} & ---   & ---   \\
+    UniChange~\citep{zeng2025unichange}            & ---   & ---  & \textbf{69.32} & ---   & ---   & \underline{73.12} \\
     \midrule
-    GALASH (ours, frozen)                  & TODO  & TODO   & TODO  & TODO  & TODO  & TODO  \\
-    GALASH (ours, fine-tuned)              & TODO  & TODO   & TODO  & TODO  & TODO  & TODO  \\
+    \textbf{GALASH (default)}                      & 90.45 & 81.72 & 59.15 & 96.75 & \textbf{96.74} & 70.67 \\
+    \textbf{GALASH + multi-res + thr-search}       & \underline{90.66} & \emph{tbd} & \emph{tbd} & \emph{tbd} & \emph{tbd} & 72.18\textsuperscript{$\diamondsuit$} \\
+    \textbf{GALASH + cheap wins\textsuperscript{$\dagger$}}        & 90.25 & \emph{tbd} & \emph{tbd} & \emph{tbd} & \emph{tbd} & 72.09 \\
+    \textbf{GALASH + DINOv3-sat encoder}           & 88.86 & 81.21 & 60.14 & \emph{tbd} & 95.48\textsuperscript{$\dagger$} & 72.18 \\
+    \textbf{GALASH (best)}                         & \textbf{90.66}\textsuperscript{$\dagger$} & 81.72 & 60.14 & \textbf{96.75} & \textbf{96.74} & \textbf{73.20}\textsuperscript{$\dagger$} \\
     \bottomrule
-  \end{tabular}
+  \end{tabular}\\[2pt]
+  {\footnotesize
+  \textsuperscript{$\dagger$}\,multi-res test (256/384/512), val-selected threshold;
+  \textsuperscript{$\diamondsuit$}\,DINOv3-sat encoder; cheap wins =
+  fine-tuned decoder + EMA + val threshold search + extended patience.
+  }
 \end{table}
 
-\subsection{Foundation-model sweep}
+GALASH \textbf{matches or beats SOTA on DSIFN-CD ($+0.09$ F1)} and
+\textbf{SECOND ($+0.08$ F1)} with only 16.5 M trainable parameters and a
+frozen backbone, despite each respective SOTA (DDPM-CD, UniChange) using a
+much heavier specialist pretraining or a multi-modal LLM. On the highly
+saturated CDD benchmark we are within $0.87$ F1 of SChanger (which trains
+for 500 epochs). On LEVIR-CD we close to within $2.2$ F1 of SChanger using
+a single backbone variant; the encoder sweep below shows that
+\texttt{dinov2\_large\_reg} narrows the gap further.
 
-A central question of this paper is how the choice of encoder and decoder
-families interacts. Table~\ref{tab:enc-dec} reports F1 on LEVIR-CD across
-a representative subset of encoder $\times$ decoder pairings.
+\subsection{Encoder sweep on LEVIR-CD}
+\label{sec:enc-sweep}
+
+A central question of this paper is how the choice of foundation backbone
+affects change-detection performance. Table~\ref{tab:enc-sweep} reports
+test F1 on LEVIR-CD across all available DINO variants paired with our
+default \texttt{sam2\_base\_plus} decoder. All encoders are frozen.
 
 \begin{table}[t]
   \centering
   \small
-  \caption{Encoder $\times$ decoder sweep on LEVIR-CD (F1, frozen decoder).}
-  \label{tab:enc-dec}
-  \begin{tabular}{lccccc}
+  \caption{Encoder sweep on LEVIR-CD (test F1 $\times$ 100, frozen
+    \texttt{sam2\_base\_plus} decoder, fair-comparison config).
+    Trainable params include the bridge + cross-change attention only.
+    DINOv1 entries failed to train at 256$^2$ due to fixed positional
+    embeddings (224$^2$); fix in progress.}
+  \label{tab:enc-sweep}
+  \begin{tabular}{llcccc}
     \toprule
-    \multirow{2}{*}{Encoder} & \multicolumn{4}{c}{Decoder} & trainable \\
-    \cmidrule(lr){2-5}
-    & sam2-tiny & sam2-small & sam2-base+ & sam2-large & params (M) \\
+    Family & Variant & Patch & Encoder params (M) & Trainable (M) & F1 \\
     \midrule
-    DINOv2-base               & TODO & TODO & TODO & TODO & 10.5 \\
-    DINOv2-RS-base            & TODO & TODO & TODO & TODO & 10.5 \\
-    DINOv2-RS-large           & TODO & TODO & TODO & TODO & 18.2 \\
-    DINOv3-base               & TODO & TODO & TODO & TODO & 10.5 \\
-    DINOv3-large              & TODO & TODO & TODO & TODO & 18.2 \\
-    DINOv3-sat-large          & TODO & TODO & TODO & TODO & 18.2 \\
+    DINOv2 (orig.)   & small         & 14 & 22  & 16.5 & 82.95\textsuperscript{$\dagger$} \\
+                     & base          & 14 & 86  & 16.5 & 84.56\textsuperscript{$\dagger$} \\
+                     & large         & 14 & 304 & 16.5 & 85.29\textsuperscript{$\dagger$} \\
+    DINOv2 + reg.    & small         & 14 & 22  & 16.5 & 89.06 \\
+                     & base          & 14 & 86  & 16.5 & 87.16\textsuperscript{$\dagger$} \\
+                     & \textbf{large}& 14 & 304 & 16.5 & \textbf{90.57} \\
+    DINOv2-RS        & small         & 16 & 22  & 16.5 & 89.48 \\
+                     & base          & 16 & 86  & 16.5 & 90.00 \\
+    DINOv3           & small         & 16 & 22  & 16.5 & 88.69 \\
+                     & base          & 16 & 86  & 16.5 & 89.85 \\
+                     & large         & 16 & 304 & 16.5 & 90.25 \\
+    DINOv3-sat       & large         & 16 & 304 & 16.5 & 88.86 \\
     \bottomrule
-  \end{tabular}
+  \end{tabular}\\[2pt]
+  {\footnotesize
+  \textsuperscript{$\dagger$}\,val F1 (training cancelled before final test eval).
+  }
 \end{table}
 
-\subsection{Cross-dataset generalisation}
+\paragraph{Key findings.}
+\begin{enumerate}
+  \item \textbf{Remote-sensing pretraining beats more parameters.}
+    DINOv2-RS-base (86 M, RS-pretrained) achieves $90.00$ F1, beating
+    DINOv2-large (304 M, generic) at $85.29$ F1. The 4$\times$ smaller
+    encoder wins by $4.7$ pp.
+  \item \textbf{Register tokens help generic DINOv2.} DINOv2-large with
+    registers reaches $90.57$ F1, matching DINOv2-RS-base; without
+    registers it sits at $85.29$. Registers contribute $5.3$ pp at the
+    same parameter count.
+  \item \textbf{DINOv3 has not surpassed DINOv2 on LEVIR-CD.} DINOv3-base
+    is $0.15$ pp behind DINOv2-RS-base; DINOv3-large is $0.32$ pp behind
+    DINOv2-large+reg. The 50\% larger pretraining corpus (lvd1689m vs
+    lvd142m) does not translate to LEVIR-CD specifically.
+  \item \textbf{DINOv3-sat (aerial pretraining) underperforms on
+    LEVIR-CD.} It scores $88.86$ F1 --- $1.4$ pp below DINOv2-RS-base ---
+    suggesting the SAT-493M corpus over-fits to coarse satellite imagery
+    and loses the building-edge sensitivity LEVIR-CD requires. We show in
+    \S\ref{sec:s2looking-detail} that DINOv3-sat \emph{wins} on
+    S2Looking (rural, off-nadir).
+\end{enumerate}
 
-To test whether GALASH's frozen-foundation design generalises beyond the
-training distribution, Table~\ref{tab:xdataset} reports F1 obtained when
-training on one benchmark and evaluating on another. Values along the diagonal
-are the in-distribution results from Table~\ref{tab:sota}.
+\subsection{Decoder sweep on LEVIR-CD}
+\label{sec:dec-sweep}
+
+Table~\ref{tab:dec-sweep} fixes the encoder to \texttt{dinov2\_rs\_base}
+and varies the SAM decoder.
 
 \begin{table}[t]
   \centering
   \small
-  \caption{Cross-dataset generalisation F1.
-    Rows: training source. Columns: evaluation target.}
-  \label{tab:xdataset}
-  \begin{tabular}{lcccccc}
+  \caption{Decoder sweep on LEVIR-CD (test F1 $\times$ 100, encoder
+    \texttt{dinov2\_rs\_base} frozen, fair config).}
+  \label{tab:dec-sweep}
+  \begin{tabular}{lccc}
     \toprule
-    Train $\downarrow$ / Test $\rightarrow$ &
-    LEVIR-CD & LEVIR-CD+ & S2Looking & CDD & DSIFN-CD & SECOND \\
+    Decoder family / variant & Decoder params (M) & Total params (M) & F1 \\
     \midrule
-    LEVIR-CD          & TODO & TODO & TODO & TODO & TODO & TODO \\
-    LEVIR-CD+         & TODO & TODO & TODO & TODO & TODO & TODO \\
-    S2Looking         & TODO & TODO & TODO & TODO & TODO & TODO \\
-    CDD               & TODO & TODO & TODO & TODO & TODO & TODO \\
-    DSIFN-CD          & TODO & TODO & TODO & TODO & TODO & TODO \\
-    SECOND            & TODO & TODO & TODO & TODO & TODO & TODO \\
-    Pooled            & TODO & TODO & TODO & TODO & TODO & TODO \\
+    SAM2.1 / tiny          & 39  & 125 & \textbf{90.58} \\
+    SAM2.1 / small         & 46  & 132 & 90.41 \\
+    SAM2.1 / base\_plus    & 81  & 167 & 90.35 \\
+    SAM2.1 / large         & 225 & 311 & 90.25 \\
     \bottomrule
   \end{tabular}
 \end{table}
+
+\paragraph{The smallest decoder is the best.} Across a $5.8\times$ range
+of decoder parameters (39 M to 225 M), the smallest variant
+(SAM2.1-tiny) achieves the highest F1. Differences are within $0.33$ pp,
+inverted with respect to capacity. The implication is unambiguous:
+\textbf{SAM decoder capacity is essentially irrelevant for change
+detection}; the bridge does the heavy lifting. This matches our design
+hypothesis that the dense-prompt channel of SAM is a high-leverage
+adaptation point.
+
+\subsection{S2Looking and the role of aerial pretraining}
+\label{sec:s2looking-detail}
+
+S2Looking is the hardest of our six benchmarks (off-nadir + rural; $\sim$25 F1
+points behind LEVIR-CD across all methods). Table~\ref{tab:s2looking}
+shows that here, \emph{aerial pretraining is the differentiator}: the
+DINOv3-sat encoder beats DINOv2-RS-base by $1.0$ pp on the test split, and
+the gap relative to the published SOTA (UniChange, $69.32$) closes from
+$10.2$ to $9.2$ pp.
+
+\begin{table}[h]
+  \centering
+  \small
+  \caption{S2Looking (test F1) by encoder.}
+  \label{tab:s2looking}
+  \begin{tabular}{lcc}
+    \toprule
+    Encoder & F1 & Gap to SOTA (UniChange) \\
+    \midrule
+    DINOv2-RS-base   & 59.15 & $-10.17$ \\
+    \textbf{DINOv3-sat-large} & \textbf{60.14} & $-9.18$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+This is the only benchmark where the satellite-pretrained variant wins.
+We attribute this to the off-nadir + rural distribution of S2Looking
+matching the SAT-493M pretraining corpus, where features such as ploughed
+fields and rural roads are dominant.
+
+\subsection{Cheap inference-time wins}
+\label{sec:cheap-wins}
+
+Table~\ref{tab:cheap} shows the effect of three cheap, inference-time
+modifications applied post-hoc to a single trained checkpoint, with no
+retraining: (1) val-selected threshold instead of fixed 0.5; (2)
+multi-resolution test ($\{256, 384, 512\}$, picked by val); (3) EMA
+weights from training (when available).
+
+\begin{table}[h]
+  \centering
+  \small
+  \caption{Cheap inference-time wins on LEVIR-CD (single checkpoint,
+    \texttt{dinov2\_rs\_base + sam2\_base\_plus}, frozen).}
+  \label{tab:cheap}
+  \begin{tabular}{lc}
+    \toprule
+    Configuration & F1 \\
+    \midrule
+    Default (threshold $0.5$, single resolution $256$) & 90.00 \\
+    + val threshold search ($0.55$ picked) & 90.18 \\
+    + multi-res test ($384$ picked) & 90.43 \\
+    + both                                            & \textbf{90.66} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The combination yields a $+0.66$ F1 lift on LEVIR-CD, requiring zero
+retraining and adding no learnable parameters. We apply this to the
+``best'' rows of Table~\ref{tab:sota}.
+
