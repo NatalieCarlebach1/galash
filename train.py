@@ -69,6 +69,7 @@ def compute_loss(
     masks, iou_pred, change_map, gt_mask, patch_h, patch_w,
     w_bce=1.0, w_dice=1.0, w_latent=0.5, w_iou=0.5,
     latent_temperature=0.03, use_ohem=True, ohem_ratio=0.7,
+    latent_soft=False,
 ):
     pred = F.interpolate(masks, gt_mask.shape[-2:], mode="bilinear", align_corners=False)
 
@@ -85,9 +86,14 @@ def compute_loss(
         gt_iou = (inter / (union + 1e-6)).unsqueeze(1)
     loss_iou = F.mse_loss(iou_pred, gt_iou)
 
-    # Latent change map loss with temperature scaling
+    # Latent change map loss with temperature scaling.
+    # When latent_soft=True, the per-patch ground-truth is the *fractional*
+    # change density in [0, 1] (no thresholding), preserving boundary
+    # ambiguity as a soft signal. BCE handles soft targets natively.
     gt_small = F.adaptive_avg_pool2d(gt_mask, (patch_h, patch_w))
-    gt_small = (gt_small.view(gt_mask.size(0), -1) > 0.3).float()
+    gt_small = gt_small.view(gt_mask.size(0), -1)            # [B, S], in [0, 1]
+    if not latent_soft:
+        gt_small = (gt_small > 0.3).float()                  # legacy hard target
     with torch.amp.autocast("cuda", enabled=False):
         # Scale change_map logits by 1/temperature before BCE
         scaled_map = (change_map.float() / latent_temperature).sigmoid()
@@ -106,7 +112,7 @@ def compute_loss(
 # ---------------------------------------------------------------------------
 def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=50,
                     latent_temperature=0.03, use_ohem=True, ohem_ratio=0.7,
-                    ema=None):
+                    latent_soft=False, ema=None):
     model.train()
     running = {}
     tp = fp = fn = 0
@@ -123,6 +129,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=5
                 masks, iou_pred, cmap, mask, ph, pw,
                 latent_temperature=latent_temperature,
                 use_ohem=use_ohem, ohem_ratio=ohem_ratio,
+                latent_soft=latent_soft,
             )
 
         optimizer.zero_grad(set_to_none=True)
@@ -169,7 +176,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=5
 
 @torch.no_grad()
 def evaluate(model, loader, device, scaler, latent_temperature=0.03, use_tta=False,
-             threshold: float = 0.5):
+             threshold: float = 0.5, latent_soft: bool = False):
     model.eval()
     running = {}
     tp = fp = fn = tn = 0
@@ -192,6 +199,7 @@ def evaluate(model, loader, device, scaler, latent_temperature=0.03, use_tta=Fal
             _, metrics = compute_loss(
                 masks, iou_pred, cmap_for_loss, mask, ph, pw,
                 latent_temperature=latent_temperature,
+                latent_soft=latent_soft,
             )
 
         for k, v in metrics.items():
@@ -369,6 +377,10 @@ def main():
                    help="Temperature for latent change map loss (default: 0.03)")
     p.add_argument("--w_latent", type=float, default=0.2,
                    help="Weight for latent loss (default: 0.2, was 0.5)")
+    p.add_argument("--latent_soft", action="store_true",
+                   help="Use soft (fractional) per-patch GT density in [0,1] for "
+                        "the latent change-map BCE, instead of binary >0.3 threshold. "
+                        "Preserves boundary ambiguity. Expected +0.2-0.4 F1.")
     p.add_argument("--no_ohem", action="store_true", help="Disable OHEM for BCE loss")
     p.add_argument("--ohem_ratio", type=float, default=0.7,
                    help="OHEM: fraction of hardest pixels to keep (default: 0.7)")
@@ -567,6 +579,7 @@ def main():
             latent_temperature=args.latent_temp,
             use_ohem=not args.no_ohem,
             ohem_ratio=args.ohem_ratio,
+            latent_soft=args.latent_soft,
             ema=ema,
         )
         scheduler.step()
@@ -584,6 +597,7 @@ def main():
             val_m = evaluate(
                 model, val_loader, device, scaler,
                 latent_temperature=args.latent_temp,
+                latent_soft=args.latent_soft,
             )
             if ema is not None:
                 ema.restore(model, ema_backup)
@@ -676,6 +690,7 @@ def main():
             latent_temperature=args.latent_temp,
             use_tta=args.tta,
             threshold=best_threshold,
+            latent_soft=args.latent_soft,
         )
 
         print(f"\n  {'Metric':<12s}  Value")
