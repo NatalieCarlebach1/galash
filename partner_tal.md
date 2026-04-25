@@ -86,14 +86,23 @@ All 3 GPUs (RTX A5000, 24 GB each) are running:
 
 | GPU | Run | Status |
 |---|---|---|
-| 0 | seed42 × levir_cd | Running (epoch ~10+) |
-| 1 | seed42 × cdd | Running (epoch ~7+) |
-| 2 | seed42 × dsifn_cd | Running (epoch ~4+) |
+| 0 | seed42 × levir_cd | **Done** — TEST F1=0.9018 (0.9052 with multi-scale eval) |
+| 0 | seed43 × levir_cd | Running — started ~21:11, epoch 2+ |
+| 1 | seed42 × cdd | Running — epoch 173+, val 0.9600 |
+| 2 | seed42 × dsifn_cd | Running — epoch 172+, val 0.9593 |
 
-Logs: `/tmp/seed42_levir.log`, `/tmp/seed42_cdd.log`, `/tmp/seed42_dsifn.log`
+Logs: `/tmp/seed42_levir.log`, `/tmp/seed42_cdd.log`, `/tmp/seed42_dsifn.log`, `/tmp/seed43_levir.log`
 
-**seed42 × SECOND** still needs to be started — waiting on GPU 2 to finish DSIFN.
-All processes are detached (`?` TTY) so they'll survive disconnection.
+seed43 was launched with `nohup` (better than bare `&` — survives terminal close):
+```bash
+CUDA_VISIBLE_DEVICES=0 nohup python3 train.py \
+    --config configs/datasets/levir_cd.yaml \
+    --encoder dinov2_rs_base --decoder sam2_base_plus \
+    --seed 43 \
+    --save_dir runs/seeds/seed43_levir_cd > /tmp/seed43_levir.log 2>&1 &
+```
+
+All processes are detached and will survive disconnection.
 
 ### Intermediate results snapshot — 2026-04-25 ~11:49
 
@@ -116,7 +125,36 @@ These are all val-based previews (~) — the real test F1 gets written to
 
 ---
 
-## 5. Still TODO on my end
+## 5. Canonical eval command
+
+After each run finishes, evaluate with multi-scale TTA + threshold search:
+
+```bash
+conda activate /home/tal/natalie/conda_env
+CUDA_VISIBLE_DEVICES=0 python3 eval.py \
+  --encoder dinov2_rs_base --decoder sam2_base_plus \
+  --finetune_decoder \
+  --checkpoint runs/seeds/<run_name>/<timestamp>/best.pt \
+  --datasets <dataset_name> \
+  --test_img_sizes 256 384 512 \
+  --search_threshold \
+  --tta
+```
+
+This sweeps sizes (256/384/512) and thresholds on val, picks the best combo,
+then applies to test. Typically gains +0.3-0.5 pp over the fixed threshold=0.50
+that `train.py` saves in `test_results.json`.
+
+**seed42 × levir_cd result** (already evaluated):
+```
+val@size=384 threshold=0.60  F1=0.9103  ← best on val
+levir_cd  TEST  F1=0.9052  IoU=0.8268  P=0.9208  R=0.8901  OA=0.9905  K=0.9002
+```
+Gap to SOTA: −2.35 pp (SChanger: 0.9287)
+
+---
+
+## 6. Still TODO on my end
 
 - [ ] seed42 × SECOND (queue when GPU 2 frees up)
 - [ ] seeds 43 & 44 × all 4 datasets (12 runs total)
