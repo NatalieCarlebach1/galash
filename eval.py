@@ -102,9 +102,9 @@ def evaluate_dataset(model, ds_name, split_dir, img_size, batch_size, num_worker
 
         with autocast(device_type="cuda", enabled=True):
             if use_tta:
-                masks, iou_pred, _ = model.forward_tta(ref, tgt)
+                masks, iou_pred, _, _ = model.forward_tta(ref, tgt)
             else:
-                masks, iou_pred, _ = model(ref, tgt)
+                masks, iou_pred, _, _ = model(ref, tgt)
 
         metrics.update(masks, gt, threshold=threshold)
 
@@ -142,9 +142,9 @@ def search_threshold_on_val(model, val_dir, img_size, batch_size, num_workers,
         ref, tgt, gt = ref.to(device), tgt.to(device), gt.to(device)
         with autocast(device_type="cuda", enabled=True):
             if use_tta:
-                masks, _, _ = model.forward_tta(ref, tgt)
+                masks, _, _, _ = model.forward_tta(ref, tgt)
             else:
-                masks, _, _ = model(ref, tgt)
+                masks, _, _, _ = model(ref, tgt)
         pred = F.interpolate(masks, gt.shape[-2:], mode="bilinear", align_corners=False)
         preds.append(pred.sigmoid().cpu())
         gts.append(gt.cpu())
@@ -214,11 +214,23 @@ def main():
 
     # ── model ──
     print("Loading model …")
+    # Tier-1 latent-space args may be embedded in the saved ckpt['args'] —
+    # auto-pick them up if present so eval matches training architecture.
+    bidir_attn = False
+    local_window = 1
+    saved_args = (torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+                  .get('args', {}) if os.path.isfile(args.checkpoint) else {})
+    if isinstance(saved_args, dict):
+        bidir_attn = bool(saved_args.get('bidir_attn', False))
+        local_window = int(saved_args.get('local_window', 1))
+
     model = ChangeDetector(
         encoder=encoder_name,
         decoder=decoder_name,
         ckpt_dir=ckpt_dir,
         finetune_decoder=args.finetune_decoder,
+        bidir_attn=bidir_attn,
+        local_window=local_window,
         sam2_checkpoint=args.sam2_ckpt,
         sam2_config=args.sam2_cfg,
     ).to(device)

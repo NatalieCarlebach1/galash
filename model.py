@@ -110,13 +110,23 @@ class CrossChangeAttention(nn.Module):
     Produces:
         change_tokens – per-patch change representation
         change_map    – [B, S] soft change score (the "small map" for aux loss)
+
+    Tier-1 ablations (controlled by kwargs):
+      - bidirectional: average forward (ref→tgt) and backward (tgt→ref)
+        attentions. Enforces symmetry of binary CD.
+      - local_window: instead of taking only the diagonal of the attention map,
+        take max similarity over a (W×W) spatial window around each diagonal
+        entry. Robust to small ref/tgt registration shifts. W=1 = current behaviour.
     """
 
-    def __init__(self, dim: int, num_heads: int = 8, init_temperature: float = 0.07):
+    def __init__(self, dim: int, num_heads: int = 8, init_temperature: float = 0.07,
+                 bidirectional: bool = False, local_window: int = 1):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.log_temp = nn.Parameter(torch.log(torch.tensor(1.0 / init_temperature)))
+        self.bidirectional = bidirectional
+        self.local_window = max(1, int(local_window))
 
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
@@ -124,27 +134,70 @@ class CrossChangeAttention(nn.Module):
         self.out_proj = nn.Linear(dim, dim)
         self.norm = nn.LayerNorm(dim)
 
-    def forward(self, ref_tokens: Tensor, tgt_tokens: Tensor):
-        B, S, D = ref_tokens.shape
+    @staticmethod
+    def _local_window_similarity(avg_attn, h, w, window):
+        """Replace diag(avg_attn) with max over (window x window) tgt-side neighborhood
+        for each ref position. avg_attn: [B, S, S] with S = h*w."""
+        if window == 1:
+            return torch.diagonal(avg_attn, dim1=1, dim2=2)  # [B, S]
+        B = avg_attn.size(0)
+        device = avg_attn.device
+        half = window // 2
+        ri = torch.arange(h, device=device).view(h, 1).expand(h, w)  # [h, w]
+        rj = torch.arange(w, device=device).view(1, w).expand(h, w)
+        sims = []
+        for di in range(-half, half + 1):
+            for dj in range(-half, half + 1):
+                ti = (ri + di).clamp(0, h - 1)
+                tj = (rj + dj).clamp(0, w - 1)
+                i_idx = (ri * w + rj).flatten()
+                j_idx = (ti * w + tj).flatten()
+                # advanced indexing on dim=1 only would require a more complex op;
+                # gather over dim=2 with broadcast on dim=1:
+                rows = avg_attn[:, i_idx, :]                           # [B, S, S]
+                vals = rows.gather(2, j_idx.view(1, -1, 1).expand(B, -1, 1)).squeeze(-1)  # [B, S]
+                sims.append(vals)
+        return torch.stack(sims, dim=-1).max(dim=-1).values  # [B, S]
+
+    def _attn_block(self, q_in, k_in, v_in):
+        """One direction of cross-attention; returns (attended, attn_weights)."""
+        B, S, D = q_in.shape
         H, d = self.num_heads, self.head_dim
-
-        q = self.q_proj(ref_tokens).view(B, S, H, d).transpose(1, 2)
-        k = self.k_proj(tgt_tokens).view(B, S, H, d).transpose(1, 2)
-        v = self.v_proj(tgt_tokens).view(B, S, H, d).transpose(1, 2)
-
+        q = self.q_proj(q_in).view(B, S, H, d).transpose(1, 2)
+        k = self.k_proj(k_in).view(B, S, H, d).transpose(1, 2)
+        v = self.v_proj(v_in).view(B, S, H, d).transpose(1, 2)
         temp = self.log_temp.exp().clamp(min=1.0)
-        attn_logits = (q @ k.transpose(-2, -1)) * (temp / d**0.5)
+        attn_logits = (q @ k.transpose(-2, -1)) * (temp / d ** 0.5)
         attn_weights = attn_logits.softmax(dim=-1)
-
         attended = (attn_weights @ v).transpose(1, 2).reshape(B, S, D)
         attended = self.out_proj(attended)
+        return attended, attn_weights
 
-        change_tokens = self.norm(attended - ref_tokens)
+    def forward(self, ref_tokens: Tensor, tgt_tokens: Tensor,
+                grid_h: int = None, grid_w: int = None):
+        B, S, D = ref_tokens.shape
+        # Forward direction: query=ref, key/value=tgt
+        attended_fwd, attn_fwd = self._attn_block(ref_tokens, tgt_tokens, tgt_tokens)
+        change_tokens = self.norm(attended_fwd - ref_tokens)
 
-        avg_attn = attn_weights.mean(dim=1)
-        similarity = torch.diagonal(avg_attn, dim1=1, dim2=2)
+        # If grid not given, assume square. Caller typically passes ph, pw.
+        if grid_h is None:
+            grid_h = grid_w = int(S ** 0.5)
+            if grid_h * grid_w != S:
+                grid_h = grid_w = 1   # fallback (won't trigger window > 1 cleanly)
+
+        avg_attn_fwd = attn_fwd.mean(dim=1)            # [B, S, S]
+        sim_fwd = self._local_window_similarity(avg_attn_fwd, grid_h, grid_w, self.local_window)
+
+        if self.bidirectional:
+            _, attn_bwd = self._attn_block(tgt_tokens, ref_tokens, ref_tokens)
+            avg_attn_bwd = attn_bwd.mean(dim=1)
+            sim_bwd = self._local_window_similarity(avg_attn_bwd, grid_h, grid_w, self.local_window)
+            similarity = 0.5 * (sim_fwd + sim_bwd)
+        else:
+            similarity = sim_fwd
+
         change_map = 1.0 - similarity
-
         return change_tokens, change_map
 
 
@@ -247,6 +300,16 @@ class Bridge(nn.Module):
                 nn.Conv2d(32, 32, 3, padding=1, bias=False), nn.GroupNorm(8, 32), nn.GELU(),
             )
 
+        # Auxiliary multi-scale change-prediction heads (deep supervision).
+        # Output 1-channel logit maps at three resolutions to be supervised
+        # against down-pooled GT masks. Cheap (~3K params), only used when
+        # the train-loop has multi_scale_latent=True. Always populated so
+        # the forward pass is deterministic; loss decides whether to use.
+        self.aux_head_fused = nn.Conv2d(sam_dim, 1, kernel_size=1)
+        if use_high_res:
+            self.aux_head_hr1 = nn.Conv2d(64, 1, kernel_size=1)
+            self.aux_head_hr0 = nn.Conv2d(32, 1, kernel_size=1)
+
     def forward(self, multi_feats, change_tokens, h, w, target_h=64, target_w=64):
         B = multi_feats[0].size(0)
 
@@ -284,7 +347,15 @@ class Bridge(nn.Module):
 
             high_res_features = [feat_s0, feat_s1]
 
-        return image_emb, dense, high_res_features
+        # Multi-scale auxiliary change predictions (logits, B×1×H×W).
+        # Coarsest first → finest last; lets compute_loss apply
+        # progressively decaying weights.
+        aux_change_maps = [self.aux_head_fused(image_emb)]   # [B,1,64,64]
+        if self.use_high_res:
+            aux_change_maps.append(self.aux_head_hr1(feat_s1))   # [B,1,128,128]
+            aux_change_maps.append(self.aux_head_hr0(feat_s0))   # [B,1,256,256]
+
+        return image_emb, dense, high_res_features, aux_change_maps
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -383,6 +454,9 @@ class ChangeDetector(nn.Module):
         sam_target_size: int = 64,
         finetune_decoder: bool = False,
         decoder_lr_scale: float = 0.1,
+        # Tier-1 latent-space ablations
+        bidir_attn: bool = False,
+        local_window: int = 1,
         # Backward compat: direct HF/path overrides
         dino_model_name: Optional[str] = None,
         sam2_checkpoint: Optional[str] = None,
@@ -411,7 +485,10 @@ class ChangeDetector(nn.Module):
             self.feature_layers = feature_layers
 
         # ── Cross-Attention (TRAINABLE) ──────────────────────────────
-        self.cross_attn = CrossChangeAttention(self.dino_dim, num_heads, temperature)
+        self.cross_attn = CrossChangeAttention(
+            self.dino_dim, num_heads, temperature,
+            bidirectional=bidir_attn, local_window=local_window,
+        )
 
         # ── Decoder loading ──────────────────────────────────────────
         if sam2_checkpoint and sam2_config:
@@ -505,19 +582,22 @@ class ChangeDetector(nn.Module):
         pw = ref.shape[3] // self.patch_size
 
         ref_multi, tgt_multi, ref_tok, tgt_tok = self._dino_forward_pair(ref, tgt)
-        change_tokens, change_map = self.cross_attn(ref_tok, tgt_tok)
+        change_tokens, change_map = self.cross_attn(ref_tok, tgt_tok, grid_h=ph, grid_w=pw)
 
         bridge_input = [
             (r - t) + change_tokens for r, t in zip(ref_multi, tgt_multi)
         ]
 
         th = tw = self.sam_target_size
-        image_emb, dense_prompt, high_res_features = self.bridge(
+        image_emb, dense_prompt, high_res_features, aux_change_maps = self.bridge(
             bridge_input, change_tokens, ph, pw, th, tw
         )
 
         masks, iou_pred = self._decode(image_emb, dense_prompt, high_res_features, B)
-        return masks, iou_pred, change_map
+        # Returns: pixel mask, predicted IoU, patch-level change_map (for legacy
+        # latent loss), list of aux change-map logits at multiple scales (for
+        # multi-scale latent loss when --multi_scale_latent is set).
+        return masks, iou_pred, change_map, aux_change_maps
 
     # -------- TTA forward --------
     @torch.no_grad()
@@ -541,7 +621,7 @@ class ChangeDetector(nn.Module):
                 r = torch.rot90(r, rot90k, [-2, -1])
                 t = torch.rot90(t, rot90k, [-2, -1])
 
-            masks, iou_pred, _ = self(r, t)
+            masks, iou_pred, _, _ = self(r, t)
 
             if rot90k > 0:
                 masks = torch.rot90(masks, -rot90k, [-2, -1])
@@ -560,7 +640,8 @@ class ChangeDetector(nn.Module):
         n = len(transforms)
         avg_prob = mask_sum / n
         avg_logits = torch.logit(avg_prob.clamp(1e-6, 1 - 1e-6))
-        return avg_logits, iou_sum / n, None
+        # Aux change maps are train-only; TTA doesn't need them.
+        return avg_logits, iou_sum / n, None, []
 
     # -------- convenience --------
     def trainable_parameters(self):

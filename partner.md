@@ -1,12 +1,118 @@
 # GALASH — partner collaboration guide
 
-Hi! 💙 We're working together on this change-detection paper. I'm running on a SLURM cluster; **you have 3 GPUs**, and there's plenty of useful work we can split between us.
+Hi 💙 — this file is the master overview. There's also `partner_tal.md` (your
+notes back to me) and `EXPERIMENTS.md` (single-source-of-truth progress doc).
 
-This file brings you up to speed on the project, tells you how to set up, and gives you a concrete list of experiments you can run on your machine that **don't overlap** with mine.
+**Latest update (Tal): 2026-04-25 mid-day** — read §0 first, it's the catch-up.
+Then the rest of the file is the original setup guide; update yourself when
+something changes.
 
 ---
 
-## 1. TL;DR — what is this project?
+## 0. What's new since you pushed `partner_tal.md` (read this first!)
+
+### Your work (commit `3c606fa`) — landed cleanly ✅
+
+- `--seed` flag in train.py — used in all my new sweeps too 🙏
+- monitor.py local-path fix — I'm using your version now
+- partner_tal.md with your environment + Tier-A setup + interim seed-42 results
+
+Your **seed42 × levir_cd** at val 0.8964 (epoch 34) is right on track to match
+my fair-config baseline (0.9045 test). Looks great.
+
+### My new commits + code changes you should know about
+
+Branch is now at `93d3b51`+. Pull to get:
+
+| Commit | What |
+|---|---|
+| `d8e3489` | Paper Tables 1–6 filled with real numbers (`paper/sections/*.tex`) |
+| `93d3b51` | `EXPERIMENTS.md` — full progress audit + 19-item TODO table |
+| (uncommitted, in flight) | Tier-1 latent-space ablations: bidir / local-window / lovasz / mse / multi-scale aux |
+
+**New CLI flags in `train.py`** (all default to "off" → backward compatible):
+
+| Flag | What |
+|---|---|
+| `--latent_soft` | Use continuous fractional density instead of `>0.3` binary target for the patch-level latent loss |
+| `--w_aux_latent W` | Weight on multi-scale aux deep-supervision heads in the bridge (3 scales: 64/128/256) |
+| `--bidir_attn` | Bidirectional cross-attention (avg ref→tgt and tgt→ref) — symmetry of binary CD |
+| `--local_window K` | Local-window similarity in CrossChangeAttention (window K×K around diagonal). K=1 = current behaviour |
+| `--latent_loss {bce,mse,lovasz}` | Loss on the patch-level latent map. `lovasz` directly optimises IoU |
+| `--ema 0.999` | EMA shadow weights, used for val + saved as best.pt |
+| `--search_threshold` | At final test eval, sweep threshold ∈ [0.30, 0.70] on val and apply best to test |
+
+**New CLI flags in `eval.py`**:
+
+| Flag | What |
+|---|---|
+| `--use_ema` | Load `ema_shadow` weights from the checkpoint (if present) |
+| `--search_threshold` | Sweep threshold on val, apply best to test |
+| `--test_img_sizes 256 384 512` | Multi-resolution test, picks best (size, threshold) by val F1 |
+
+**Architectural changes (model.py):**
+- `CrossChangeAttention` now accepts `bidirectional`, `local_window` kwargs.
+- `Bridge` now exposes 3 auxiliary 1×1 conv heads (always active in forward; the loss decides whether to use them).
+- `ChangeDetector.forward` returns a **4-tuple** `(masks, iou, change_map, aux_change_maps)` — the 4th element is a list of aux logit maps for deep supervision.
+- DINOv3 / DINOv2-with-registers now work — fixed register-token stripping.
+- DINOv1 added to encoder registry (but pos-embed at 224² needs interpolation fix to train at 256² — known TODO).
+
+### Current SOTA-comparison results
+
+We have **2 SOTA-beating numbers** so far:
+
+| Dataset | Our best | SOTA | Gap |
+|---|---|---|---|
+| **DSIFN-CD** | **0.9674** | 0.9665 (DDPM-CD) | **+0.09 pp ✅** |
+| **SECOND** | **0.7320** | 0.7312 (UniChange) | **+0.08 pp ✅** |
+| LEVIR-CD | **0.9089** | 0.9287 (SChanger) | −1.98 pp |
+| CDD | 0.9675 | 0.9762 (SChanger) | −0.87 pp |
+| LEVIR-CD+ | 0.8172 | 0.9150 (ChangeStar+Changen) | −9.78 pp |
+| S2Looking | 0.6014 | 0.6932 (UniChange) | −9.18 pp |
+
+**Best LEVIR-CD recipe so far:** `dinov2_rs_base + sam2_tiny` + post-hoc multi-res
+(picks size 384) + val-tuned threshold 0.55 = **0.9089**.
+
+The encoder leader is `dinov2_large_reg` (0.9057 on LEVIR-CD), the runner-up
+is `dinov3_large` (0.9025). DINOv2-RS-base is 3rd at 0.9000.
+
+**Surprising decoder finding:** SAM2.1-tiny (39 M) **beats** SAM2.1-large
+(225 M) by 0.33 F1. Decoder capacity is essentially irrelevant.
+
+### Currently running on the cluster (~50 jobs, 28 R / 16 PD)
+
+| Sweep | Count | Status |
+|---|---|---|
+| 10-job latent-loss hyperparam sweep (`w_latent` × `latent_soft`) | 10 | mostly converged ~ep 35-50 |
+| 5-job multi-scale aux loss sweep (`w_aux_latent` ∈ {0, 0.1, 0.2, 0.5} + soft combo) | 5 | most converged ~ep 70 |
+| **5-job Tier-1 sweep** (bidir / lw3 / lovasz / mse / **combo**) | 5 | just submitted, pending |
+| sam2_tiny on remaining 5 datasets | 5 | started |
+| dinov3_large on remaining 5 datasets | 5 | pending dgx |
+| Largest backbones (dinov2_giant, dinov2_giant_reg, dinov3_huge) on LEVIR-CD | 3 | pending dgx |
+| dinov2_large_reg + cheap-wins | 2 | pending dgx |
+| SAM1 decoders (vit_b/l/h) with `--no_amp` | 3 | pending dgx |
+| Pooled baseline (all 6 datasets) | 1 | pending main |
+| Plus running encL_v2_large_reg / cheap_v3sat / medical jobs | ~7 | running |
+
+**Most paper-impactful in this batch**: the Tier-1 combo (52171), the largest
+backbones (dinov2_giant, dinov3_huge), and the pooled baseline (unlocks the
+cross-dataset generalization Table 4).
+
+### Suggestions for your seeded runs given everything above
+
+You're already running seed 42 on 3 datasets — keep going! When seed 42 finishes
+all 4, please launch seeds 43 and 44 with the same config. Once seed 44 lands,
+we have variance bars for SECOND and DSIFN — directly addresses reviewer concerns
+about whether `+0.09 pp above SOTA` is real or seed noise. **Highest paper-value
+work you can do right now.**
+
+If you want to add to it: try `--seed 42 --bidir_attn --local_window 3 --latent_loss lovasz`
+on LEVIR-CD once Tier-1 results land (let me confirm which combo wins). That gives
+us the seed-42 reproduction of our champion config.
+
+---
+
+## 1. (Original §1) — TL;DR — what is this project?
 
 **GALASH** = a change-detection pipeline for aerial / satellite image pairs:
 
@@ -17,339 +123,167 @@ This file brings you up to speed on the project, tells you how to set up, and gi
                                          CrossChangeAttn ────┘    (frozen or fine-tuned)
 ```
 
-**Our pitch:** compose two frozen foundation models — a DINO encoder and a SAM decoder — with only a tiny trainable bridge. Only ~16.5 M trainable params on top of 300 M+ frozen backbones. Aiming for a top-tier venue (targeting **BMVC**, paper scaffold in `paper/`).
+**Our pitch:** compose two frozen foundation models — a DINO encoder and a SAM
+decoder — with only a tiny trainable bridge. Only ~16.5 M trainable params on
+top of 300 M+ frozen backbones. Aiming for **BMVC** (paper scaffold in `paper/`).
 
 **Novel pieces:**
-1. **Unified encoder/decoder registry** (16 encoders × 8 decoders in `model.py`) — systematic study of foundation-model pairings for CD.
+1. **Unified encoder/decoder registry** (16 encoders × 8 decoders in `model.py`).
 2. **Cross-change attention** with learnable temperature.
-3. **Bridge v2** — FPN + transformer refinement; repurposes SAM's normally-unused dense-prompt slot as a change conditioning signal.
-4. Fair per-dataset augmentation configs in `configs/datasets/*.yaml` — matched to each benchmark's published SOTA.
+3. **Bridge v2** — FPN + transformer refinement; repurposes SAM's normally-unused
+   dense-prompt slot as a change conditioning signal.
+4. **Per-dataset fair augmentation configs** (`configs/datasets/*.yaml`) matching
+   each benchmark's published SOTA. Enforced fair comparison.
+5. (NEW) **Multi-scale auxiliary deep supervision** at 3 bridge scales
+   (`--w_aux_latent`).
+6. (NEW) **Bidirectional + local-window cross-attention** (`--bidir_attn --local_window K`)
+   — better symmetry, robust to misregistration. *Currently being ablated.*
+7. (NEW) **Lovász latent loss** (`--latent_loss lovasz`) — direct IoU optimization
+   on the patch-level supervision.
 
 ---
 
-## 2. Status as of 2026-04-24 evening
+## 2. Setup on your machine — *unchanged from §4 of original, see partner_tal.md for actual setup notes*
 
-### Datasets — all 6 benchmarks ready
-
-| Dataset | Train / Val / Test | Tile | Status |
-|---|---|---|---|
-| LEVIR-CD | 7120 / 1024 / 2048 | 256² | ready |
-| LEVIR-CD+ | 637 / 0 / 348 | 1024² | ready (auto-holdout 10%) |
-| S2Looking | 3500 / 500 / 1000 | 1024² | ready |
-| CDD | 10000 / 2998 / 3000 | 256² | ready |
-| DSIFN-CD | 10000 / 2998 / 3000 | 256² | ready |
-| SECOND | 2968 / 0 / 1694 | 512² | ready (binary-collapse) |
-
-If any of these are missing on your machine, see §4.
-
-### Current SOTA gaps (live as of this commit)
-
-| Dataset | Our best (test) | SOTA | Gap |
-|---|---|---|---|
-| LEVIR-CD | 0.9000 | 0.9287 (SChanger) | −2.87 pp |
-| LEVIR-CD+ | 0.8172 | 0.9150 (ChangeStar+Changen) | −9.78 pp |
-| S2Looking | live ~0.60 val | 0.6932 (UniChange) | ~−9 pp (still running) |
-| CDD | live 0.9484 val | 0.9762 (SChanger) | ~−2.78 pp (running) |
-| DSIFN-CD | live 0.9481 val | 0.9665 (DDPM-CD) | **~−1.84 pp** — closest running |
-| SECOND | **0.7320** ⬆ | 0.7312 (UniChange) | **+0.08 pp above SOTA** |
-
-The closest gaps to SOTA are on **LEVIR-CD, CDD, DSIFN-CD, SECOND**. The two stubborn ones are **LEVIR-CD+** and **S2Looking** (both likely need Changen-style synthetic-pair pretraining to close).
-
-### What's been run / is running on my end
-
-- **~30 jobs on the SLURM cluster** covering:
-  - 6 fair per-dataset baselines (dinov2_rs_base + sam2_base_plus, running)
-  - Encoder sweep: DINOv1 / DINOv2 / DINOv2-reg / DINOv2-RS / DINOv3 / DINOv3-sat × 1 decoder on LEVIR-CD
-  - Decoder sweep: dinov2_rs_base × SAM1 (3 sizes) × SAM2.1 (4 sizes) on LEVIR-CD
-  - Full DINOv3-sat per-dataset sweep (aerial pretraining, 6 datasets)
-  - "Cheap wins" sweep: fine-tuned decoder + EMA + threshold search + longer patience on LEVIR-CD / SECOND / DSIFN
-
-See `EXPERIMENTS.md` for the full live plan.
-
----
-
-## 3. Architecture in 5 minutes
-
-If you want the full story read `paper/sections/03_method.tex`. Short version:
-
-1. **Encoder** (frozen DINO family) — takes ref and target, returns 4 layers of multi-scale patch tokens.
-2. **CrossChangeAttention** ([model.py:102-143](model.py#L102-L143)) — per-patch cross-attention between ref and target tokens with **learned temperature**. Outputs: `change_tokens` (feed to bridge) + `change_map` (aux patch-level loss).
-3. **Bridge v2** ([model.py:187-282](model.py#L187-L282)) — multi-scale FPN, transformer refinement, emits:
-   - `image_emb` (256×64×64) → SAM's `image_embeddings`
-   - `dense_prompt` (256×64×64) → SAM's `dense_prompt_embeddings` (**this slot is normally unused; we fill it with change tokens**)
-   - `high_res_features` → SAM2.1's hierarchical head
-4. **SAM decoder** (frozen or optionally fine-tuned at 0.1× LR) emits mask + IoU.
-
-**Loss**: BCE(OHEM 70%) + Dice + IoU(MSE) + Latent (patch-level BCE) with weights 1 / 1 / 0.5 / 0.2.
-
-**Trainable:** ~0.05 M (cross-attn) + ~11 M (bridge) + optional ~10-200 M (SAM decoder if fine-tuned). Default: ~16.5 M trainable on top of frozen DINO + SAM.
-
----
-
-## 4. Setup on your machine
-
-### Prerequisites
+You've already got everything working. If you ever need to redo:
 
 ```bash
-# Clone + branch
-git clone git@github.com:talshaharabany/galash.git
-cd galash
 git checkout feat/encoder-decoder-registry
+git pull
+# Already pip-installed: torch, sam2 (-e), segment-anything, gdown, rarfile, py7zr, pyyaml
+# Already downloaded: 4 SAM2.1 checkpoints + 5 datasets
+# Smoke test:
+python overfit_test.py --n 8 --steps 300 \
+  --sam2_ckpt checkpoints/sam2.1_hiera_tiny.pt \
+  --sam2_cfg configs/sam2.1/sam2.1_hiera_t.yaml
 ```
 
-### Conda environment
-
-On my cluster I use `ns-sam3`. For you, replicate with:
-
-```bash
-conda create -n galash python=3.12 -y
-conda activate galash
-
-# PyTorch — pick the CUDA version matching your GPUs
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-# (or cu121/cu118 if your GPUs are older — RTX 30xx typically cu121; RTX 40xx/Ada cu124)
-
-# SAM2 (must be installed from the Meta repo)
-git clone https://github.com/facebookresearch/sam2.git ../sam2
-cd ../sam2 && pip install -e . && cd ../galash
-
-# SAM1 (optional, for decoder sweep)
-pip install segment-anything
-
-# Everything else
-pip install -r requirements.txt
-pip install gdown rarfile py7zr pyyaml
-```
-
-### SAM2.1 checkpoints
-
-I have these at `checkpoints/`:
-```
-sam2.1_hiera_tiny.pt       # 156 MB
-sam2.1_hiera_small.pt      # 184 MB
-sam2.1_hiera_base_plus.pt  # 324 MB
-sam2.1_hiera_large.pt      # 898 MB
-```
-
-Download them from [facebookresearch/sam2](https://github.com/facebookresearch/sam2#download-checkpoints) into your `checkpoints/` folder. (SAM1 vit-b/l/h if you want to try those too.)
-
-### Datasets
-
-```bash
-# Try auto-downloads first
-python download_datasets.py --out data --datasets cdd s2looking second
-
-# If any fail (Dropbox/GDrive being flaky), the repaired versions are in scripts/:
-python scripts/fix_dsifn.py         # needs dsifn.zip (actually a RAR) in data/dsifn_cd/_tmp/
-python scripts/fix_second.py        # needs SECOND archives in data/second/_tmp/
-python scripts/fix_levir_cd.py      # needs LEVIR-CD256.zip in data/levir_cd/_tmp/
-```
-
-For this project the **must-haves** are LEVIR-CD, CDD, DSIFN-CD, SECOND (256²-pixel datasets — fit easily in 24 GB VRAM). **Nice to have**: S2Looking, LEVIR-CD+ (1024² tiles — need more memory).
-
-### HuggingFace auth (for gated DINOv3)
-
-The DINOv3 variants (small/base/large/sat_large) are behind a gated HF license. Request access at [facebook/dinov3-vitl16-pretrain-sat493m](https://huggingface.co/facebook/dinov3-vitl16-pretrain-sat493m). Once granted:
-
-```bash
-huggingface-cli login   # paste your HF token
-```
-
-### Smoke test
-
-```bash
-# Verify model builds
-python train.py --list_models
-
-# Overfit test (30 sec on 1 GPU) — catches most integration issues
-python overfit_test.py --n 8 --steps 300
-# Expected: F1 > 0.8 on the 8-image overfit
-```
+(Reminder: `python` on your box is Py2; use `python3` or your conda binary.)
 
 ---
 
-## 5. Experiments I'd suggest for your 3 GPUs
+## 3. Experiments to run — UPDATED priority list
 
-**Ground rules so we don't duplicate compute:**
+**Ground rules:** I'm running ~50 concurrent jobs on the cluster covering
+encoder/decoder/cheap-wins/Tier-1 sweeps. **Don't duplicate what I'm running.**
+The big gaps that only you can fill (because variance + multi-seed needs a
+different machine) are below.
 
-1. I'm already running the full per-dataset fair sweep + encoder sweep + decoder sweep on LEVIR-CD.
-2. I'm about to run Changen-style synthetic pretraining (Tier 3) — that's on my side.
-3. You'd have the most impact on the things I **haven't** queued: multi-seed stability, per-dataset ablations, and larger-backbone runs for the benchmarks I can't comfortably fit.
+### 🔥 Priority A — multi-seed for SOTA-beating runs (highest paper impact)
 
-Here are three priority tiers. **Each item fits on a single 24 GB GPU**, so with 3 GPUs you can run 3 concurrent.
+You're already doing this for seed 42 — just keep going.
 
-### Tier A — multi-seed statistical stability (highest ROI)
-
-Reviewers love seeing variance across seeds. My runs are single-seed. You could fill this gap.
-
-**Idea:** run the **fair per-dataset baseline** (`dinov2_rs_base + sam2_base_plus`) with 3 seeds on each of LEVIR-CD, CDD, DSIFN-CD, SECOND. 12 runs, ~3 hours each.
+**Goal:** 3 seeds × 4 datasets = 12 runs. Gives us mean ± std for the two SOTA
+claims (DSIFN +0.09, SECOND +0.08) and our two close-runner-ups (LEVIR-CD,
+CDD). Reviewers will ask for variance bars on `+0.09`-style claims and we'll
+have them.
 
 ```bash
-# Add --seed flag to train.py if missing (it's not there yet — I'll add it, or you can)
 for SEED in 42 43 44; do
   for DS in levir_cd cdd dsifn_cd second; do
     python train.py \
       --config configs/datasets/${DS}.yaml \
-      --encoder dinov2_rs_base \
-      --decoder sam2_base_plus \
-      --save_dir runs/seeds/seed${SEED}_${DS} \
-      --seed $SEED
+      --encoder dinov2_rs_base --decoder sam2_base_plus \
+      --seed $SEED \
+      --save_dir runs/seeds/seed${SEED}_${DS}
   done
 done
 ```
 
-Outputs go into `runs/seeds/...` so we can collect mean±std per dataset.
+(You've already got seed 42 × {levir_cd, cdd, dsifn_cd} running. Add SECOND
+when GPU 2 frees up, then move to seeds 43 and 44.)
 
-### Tier B — decoder fine-tuning on the datasets I haven't touched
+### 🔥 Priority B — Champion config when Tier-1 results land (~3 hours from now)
 
-My "cheap_wins" sweep fine-tunes the decoder only on LEVIR-CD / SECOND / DSIFN. You could cover **CDD and LEVIR-CD+**:
+Once my Tier-1 combo (job 52171) finishes — `--bidir_attn --local_window 3
+--latent_loss lovasz` — and assuming it beats baseline, we want a seed run of
+the champion config to confirm it's real. **Wait for me to confirm before launching.**
 
-```bash
-# FT on CDD
-python train.py \
-  --config configs/datasets/cdd.yaml \
-  --encoder dinov2_rs_base --decoder sam2_base_plus \
-  --finetune_decoder --ema 0.999 --search_threshold \
-  --patience 30 \
-  --save_dir runs/partner/cheap_cdd
+### Priority C — fill in benchmark gaps I haven't touched
 
-# FT on LEVIR-CD+
-python train.py \
-  --config configs/datasets/levir_cd_plus.yaml \
-  --encoder dinov2_rs_base --decoder sam2_base_plus \
-  --finetune_decoder --ema 0.999 --search_threshold \
-  --patience 30 \
-  --save_dir runs/partner/cheap_levir_cd_plus
-```
+Currently no one is running:
+- **`dinov2_rs_base + sam2_tiny + cheap-wins` on LEVIR-CD+ + S2Looking** (seed 42, would round out Table 1's "+ cheap wins" row)
+- **Tier-D ablations** on LEVIR-CD: `--w_latent 0`, `--no_ohem`, no-tta — though my cluster has these. Check if they've finished test eval before duplicating.
 
-### Tier C — bigger encoders I can't comfortably fit
+### Skip (I'm covering)
 
-If your GPUs are 24 GB, **dinov2_rs_large** (patch 14, 300 M params) and **dinov3_large** (patch 16) barely fit at bs=4. Very valuable for the paper if you can get final numbers:
-
-```bash
-# dinov2_rs_large on LEVIR-CD
-python train.py \
-  --config configs/datasets/levir_cd.yaml \
-  --encoder dinov2_rs_large --decoder sam2_base_plus \
-  --batch 4 \
-  --save_dir runs/partner/dinov2_rs_large_levir
-
-# NOTE: the KevinCha loader for dinov2_rs_large has a weight-key bug
-# (load_dino_rs.py:72 KeyError on 'blocks.0.mlp.fc1.weight').
-# It looks fixable — the large checkpoint uses a different key scheme.
-# If you're up for debugging that file, I'd owe you several coffees.
-```
-
-### Tier D — ablation runs (small, fast)
-
-These are single-config ablations on LEVIR-CD, ~2 hours each on 1 GPU:
-
-```bash
-# ablation: no TTA
-python train.py --config configs/datasets/levir_cd.yaml \
-  --encoder dinov2_rs_base --decoder sam2_base_plus \
-  --save_dir runs/partner/abl_notta   # (no --tta flag)
-
-# ablation: no latent loss
-python train.py --config configs/datasets/levir_cd.yaml \
-  --encoder dinov2_rs_base --decoder sam2_base_plus \
-  --w_latent 0.0 --tta \
-  --save_dir runs/partner/abl_nolatent
-
-# ablation: no OHEM
-python train.py --config configs/datasets/levir_cd.yaml \
-  --encoder dinov2_rs_base --decoder sam2_base_plus \
-  --no_ohem --tta \
-  --save_dir runs/partner/abl_noohem
-```
-
-### Recommended sequence for your 3 GPUs (Tier A first)
-
-Starts the work most likely to make the paper. All 12 seed runs fit in about **3 GPU-days** (4 hours × 12 runs / 3 GPUs):
-
-```
-GPU 0: seed42 × [levir_cd, cdd, dsifn_cd, second]
-GPU 1: seed43 × [levir_cd, cdd, dsifn_cd, second]
-GPU 2: seed44 × [levir_cd, cdd, dsifn_cd, second]
-```
-
-Then move to Tier B + Tier D. Tier C is a stretch.
+- Encoder sweep (running on dgx)
+- Decoder sweep (running on main)
+- Pooled baseline (just submitted on main)
+- DINOv3-sat per-dataset (running on dgx)
+- Latent-loss / multi-scale aux sweeps (running on main)
 
 ---
 
-## 6. How to sync results with me
+## 4. How to sync results
 
-Two options:
-
-### Option A — git-based (for small results)
-
-Push your `runs/partner/*/test_results.json` files to the branch:
+Same as before:
 
 ```bash
 cd ~/galash
 git pull origin feat/encoder-decoder-registry
-# after your runs finish
-git add runs/partner/*/test_results.json runs/partner/*/log.csv runs/partner/*/config.json
-git commit -m "partner: add seed{42,43,44} baselines for LEVIR/CDD/DSIFN/SECOND"
+# … run training …
+git add runs/seeds/*/test_results.json runs/seeds/*/log.csv runs/seeds/*/config.json
+git commit -m "partner: seed${SEED} × ${DS} done, test_f1=${F1}"
 git push origin feat/encoder-decoder-registry
 ```
 
-(`.gitignore` currently ignores `runs/` — we'll need to force-add these files or loosen the ignore for `runs/partner/*.json`.)
-
-### Option B — cloud sync for full checkpoints
-
-Checkpoints are big (~80 MB each for base, ~900 MB for large). If we want to share `best.pt` files, a Dropbox / Google Drive shared folder is easier. Up to you.
+Note `.gitignore` excludes `runs/`. Force-add the JSON+CSV files explicitly with
+`git add -f` if needed, OR add a .gitignore exception for `runs/seeds/*.json`.
 
 ---
 
-## 7. Monitoring + tools
-
-I wrote a monitor that shows live SOTA-gap across all runs:
+## 5. Tools you'll want
 
 ```bash
-python scripts/monitor.py           # one-shot
-python scripts/monitor.py --watch   # refresh every 60 sec
+# Live monitor with SOTA gap (your fixed version, works locally now):
+python scripts/monitor.py --watch
+
+# After a run finishes, post-hoc cheap wins (multi-res + threshold search):
+python eval.py --encoder dinov2_rs_base --decoder sam2_base_plus \
+  --checkpoint runs/seeds/seed42_levir_cd/<timestamp>/best.pt \
+  --datasets levir_cd \
+  --test_img_sizes 256 384 512 --search_threshold --tta
 ```
 
-It shows each run's current val F1, the final test F1 (when done), the published SOTA for that dataset, and the gap. Very handy for seeing progress at a glance.
-
-`scripts/monitor.py` reads `runs/*/log.csv` + `runs/*/test_results.json`, so it works on your `runs/partner/*` too.
-
----
-
-## 8. Project roadmap + what comes next
-
-Rough plan (subject to what results come back):
-
-1. **This week** — finish the current sweep. Collect per-dataset best numbers, fill in `paper/sections/04_experiments.tex` Table 1. Your multi-seed runs (Tier A) slot here too.
-2. **Next week** — Tier 3: Changen-style synthetic pretraining for the LEVIR-CD+ / S2Looking gaps. That's on my side, needs heavier infra.
-3. **End of month** — write the paper. Current target venue: BMVC 2026 (deadline usually April–May).
-
-If anything in the plan doesn't work for you, or you'd rather do something else (e.g., you have an idea for a new architectural piece), just say the word. 🙂
+The cheap-wins multi-res lifts LEVIR-CD test F1 by ~+0.4 to +0.7 pp at zero
+training cost — apply to every finished checkpoint.
 
 ---
 
-## 9. Files to know
+## 6. File index — what's where
 
-| Path | What it is |
+| Path | What |
 |---|---|
-| `model.py` | Encoder/decoder registry + ChangeDetector + Bridge v2 + CrossChangeAttention |
-| `train.py` | Training loop. Has EMA + threshold search. Accepts `--config` YAML |
-| `eval.py` | Eval. Has `--search_threshold` + `--test_img_sizes` + `--use_ema` |
+| `model.py` | Encoder/decoder registry + ChangeDetector + Bridge v2 (now with aux heads) + CrossChangeAttention (now with bidir + local-window) |
+| `train.py` | Training loop. Has `--seed` (you added), `--ema`, `--search_threshold`, `--latent_soft`, `--w_aux_latent`, `--bidir_attn`, `--local_window`, `--latent_loss` |
+| `eval.py` | Eval. Has `--search_threshold`, `--test_img_sizes`, `--use_ema` |
 | `dataset.py` | Dataset loaders. `build_loaders(config=...)` wires into YAML |
-| `configurable_aug.py` | YAML-driven augmentation pipeline (matches SOTA papers per-dataset) |
-| `configs/datasets/*.yaml` | Per-benchmark fair-comparison configs (aug list + hyperparams) |
-| `configs/datasets/README.md` | Schema and what-matches-what |
-| `scripts/fix_*.py` | Dataset repair scripts (DSIFN, SECOND, LEVIR-CD, OSCD tiling) |
-| `scripts/monitor.py` | Live SOTA-gap monitor |
-| `slurm/train.sbatch` | SLURM training template. Configurable via env vars |
-| `slurm/launch_sweep.sh <tier>` | Submit experiment tiers. `fair_per_dataset`, `encoder_sweep`, `decoder_sweep`, `cheap_wins`, ... |
-| `paper/` | BMVC LaTeX source. `main.tex` compiles with `cd paper && latexmk -pdf main` |
-| `EXPERIMENTS.md` | Top-level experiment plan + where numbers come from |
-| `partner.md` | This file! |
+| `configurable_aug.py` | YAML-driven augmentation pipeline (10 ops, matches SOTA papers per-dataset) |
+| `configs/datasets/*.yaml` | 6 per-benchmark fair-comparison configs |
+| `scripts/monitor.py` | Live SOTA-gap monitor (your fixed version) |
+| `scripts/fix_*.py` | Dataset repair scripts (DSIFN, SECOND, LEVIR-CD) |
+| `slurm/*.sbatch` | SLURM templates (cluster only) |
+| `slurm/launch_sweep.sh <tier>` | Submit experiment tiers |
+| `paper/` | BMVC LaTeX source — Tables 1–6 now filled with real numbers |
+| **`EXPERIMENTS.md`** | **Full progress + 19-item TODO table — read this for what's next** |
+| `partner.md` | This file (master guide) |
+| `partner_tal.md` | Your notes from yesterday |
 
 ---
 
-Love you ❤️ — let's publish this together.
+## 7. What I'm doing right now
 
-— Tal (via Claude)
+1. Implementing **Tier 2** improvements: difference-feature branch, attention entropy, deeper multi-scale aux. Will queue once Tier 1 lands.
+2. **Writing up the paper** — Tables 1–6 are filled, Tables 4 (cross-dataset gen) and 7 (encoder×decoder matrix) still pending data.
+3. **Architecture figure** still TODO (`paper/figures/architecture.pdf` is a `\fbox{}` placeholder).
+
+If your seed-42 SECOND finishes before I'm awake, post the test F1 to me — that's
+the single most valuable number you can produce right now (it's the second SOTA
+claim and currently single-seed).
+
+---
+
+Love you ❤️ — keep going!
+
+— Tal (via Claude Opus)

@@ -54,6 +54,38 @@ def dice_loss(logits: torch.Tensor, target: torch.Tensor, smooth: float = 1.0):
     return (1 - (2 * inter + smooth) / (union + smooth)).mean()
 
 
+def _lovasz_grad(gt_sorted):
+    """Compute the Lovász gradient for sorted ground-truth labels."""
+    p = len(gt_sorted)
+    gts = gt_sorted.sum()
+    intersection = gts - gt_sorted.float().cumsum(0)
+    union = gts + (1.0 - gt_sorted).float().cumsum(0)
+    jaccard = 1.0 - intersection / union
+    if p > 1:
+        jaccard[1:p] = jaccard[1:p] - jaccard[0:-1]
+    return jaccard
+
+
+def lovasz_hinge_flat(logits, labels):
+    """Lovász hinge for binary classification, flat tensors. Maximises IoU."""
+    if labels.numel() == 0:
+        return logits.sum() * 0.0
+    signs = 2.0 * labels.float() - 1.0
+    errors = 1.0 - logits * signs
+    errors_sorted, perm = torch.sort(errors, dim=0, descending=True)
+    gt_sorted = labels[perm.detach()]
+    grad = _lovasz_grad(gt_sorted)
+    return torch.dot(F.relu(errors_sorted), grad.detach())
+
+
+def lovasz_hinge(logits, labels):
+    """Per-sample Lovász hinge then mean. logits, labels: [B, *]."""
+    losses = []
+    for log, lab in zip(logits.flatten(1), labels.flatten(1)):
+        losses.append(lovasz_hinge_flat(log, lab))
+    return torch.stack(losses).mean()
+
+
 def ohem_bce_loss(logits: torch.Tensor, target: torch.Tensor, top_k_ratio: float = 0.7):
     """Online hard example mining: only backprop through hardest pixels."""
     loss_map = F.binary_cross_entropy_with_logits(logits, target, reduction='none')
@@ -70,6 +102,8 @@ def compute_loss(
     w_bce=1.0, w_dice=1.0, w_latent=0.5, w_iou=0.5,
     latent_temperature=0.03, use_ohem=True, ohem_ratio=0.7,
     latent_soft=False,
+    aux_change_maps=None, w_aux_latent=0.0,
+    latent_loss_type: str = "bce",
 ):
     pred = F.interpolate(masks, gt_mask.shape[-2:], mode="bilinear", align_corners=False)
 
@@ -95,15 +129,45 @@ def compute_loss(
     if not latent_soft:
         gt_small = (gt_small > 0.3).float()                  # legacy hard target
     with torch.amp.autocast("cuda", enabled=False):
-        # Scale change_map logits by 1/temperature before BCE
-        scaled_map = (change_map.float() / latent_temperature).sigmoid()
-        scaled_map = scaled_map.clamp(1e-6, 1 - 1e-6)
-        loss_latent = F.binary_cross_entropy(scaled_map, gt_small)
+        # change_map is in [0, 1] (it's `1 - similarity` after softmax averaging).
+        # We scale by 1/temperature and pass through sigmoid for BCE/MSE.
+        # For Lovász we treat the scaled value as a logit-style score and need
+        # binary labels.
+        scaled_logit = change_map.float() / latent_temperature
+        scaled_map = scaled_logit.sigmoid().clamp(1e-6, 1 - 1e-6)
+        if latent_loss_type == "lovasz":
+            # Lovász requires binary GT — threshold at 0.5 of the soft target.
+            gt_bin = (gt_small > 0.5).float() if latent_soft else gt_small
+            # Centered logit in [-1, 1] for hinge; (scaled_map - 0.5) * 2 ∈ (-1, 1).
+            centered = (scaled_map - 0.5) * 2.0
+            loss_latent = lovasz_hinge(centered, gt_bin)
+        elif latent_loss_type == "mse":
+            loss_latent = F.mse_loss(scaled_map, gt_small)
+        else:  # 'bce' default
+            loss_latent = F.binary_cross_entropy(scaled_map, gt_small)
 
-    total = w_bce * loss_bce + w_dice * loss_dice + w_latent * loss_latent + w_iou * loss_iou
+    # Multi-scale auxiliary latent loss (deep supervision).
+    # aux_change_maps: list of [B, 1, H_i, W_i] logit maps from coarsest → finest.
+    # Weights decay 1.0, 0.5, 0.25, ... so finest scale dominates.
+    loss_aux = torch.tensor(0.0, device=masks.device)
+    if aux_change_maps is not None and len(aux_change_maps) > 0 and w_aux_latent > 0:
+        with torch.amp.autocast("cuda", enabled=False):
+            for k, aux_logits in enumerate(aux_change_maps):
+                Hk, Wk = aux_logits.shape[-2:]
+                tgt_k = F.adaptive_avg_pool2d(gt_mask.float(), (Hk, Wk))
+                if not latent_soft:
+                    tgt_k = (tgt_k > 0.3).float()
+                # logit -> prob, clamped, then BCE on (prob, tgt) since tgt is in [0,1].
+                prob = aux_logits.float().sigmoid().clamp(1e-6, 1 - 1e-6)
+                wk = 0.5 ** k        # 1.0, 0.5, 0.25, 0.125, ...
+                loss_aux = loss_aux + wk * F.binary_cross_entropy(prob, tgt_k)
+
+    total = (w_bce * loss_bce + w_dice * loss_dice + w_latent * loss_latent
+             + w_iou * loss_iou + w_aux_latent * loss_aux)
     return total, dict(
         loss=total.item(), bce=loss_bce.item(), dice=loss_dice.item(),
         iou_loss=loss_iou.item(), latent=loss_latent.item(),
+        aux_latent=float(loss_aux.item()) if aux_change_maps else 0.0,
     )
 
 
@@ -112,7 +176,8 @@ def compute_loss(
 # ---------------------------------------------------------------------------
 def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=50,
                     latent_temperature=0.03, use_ohem=True, ohem_ratio=0.7,
-                    latent_soft=False, ema=None):
+                    latent_soft=False, w_aux_latent=0.0, latent_loss_type="bce",
+                    ema=None):
     model.train()
     running = {}
     tp = fp = fn = 0
@@ -124,12 +189,14 @@ def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=5
         pw = ref.shape[3] // model.patch_size
 
         with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
-            masks, iou_pred, cmap = model(ref, tgt)
+            masks, iou_pred, cmap, aux_maps = model(ref, tgt)
             loss, metrics = compute_loss(
                 masks, iou_pred, cmap, mask, ph, pw,
                 latent_temperature=latent_temperature,
                 use_ohem=use_ohem, ohem_ratio=ohem_ratio,
                 latent_soft=latent_soft,
+                aux_change_maps=aux_maps, w_aux_latent=w_aux_latent,
+                latent_loss_type=latent_loss_type,
             )
 
         optimizer.zero_grad(set_to_none=True)
@@ -188,12 +255,12 @@ def evaluate(model, loader, device, scaler, latent_temperature=0.03, use_tta=Fal
 
         with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
             if use_tta:
-                masks, iou_pred, cmap = model.forward_tta(ref, tgt)
+                masks, iou_pred, cmap, _ = model.forward_tta(ref, tgt)
                 # For loss computation with TTA, use None change_map
                 # We skip latent loss during TTA eval
                 cmap_for_loss = torch.zeros(ref.size(0), ph * pw, device=device)
             else:
-                masks, iou_pred, cmap = model(ref, tgt)
+                masks, iou_pred, cmap, aux_maps = model(ref, tgt)
                 cmap_for_loss = cmap
 
             _, metrics = compute_loss(
@@ -235,9 +302,9 @@ def _search_threshold(model, val_loader, device, scaler, use_tta=False,
         ref, tgt, mask = ref.to(device), tgt.to(device), mask.to(device)
         with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
             if use_tta:
-                masks, _, _ = model.forward_tta(ref, tgt)
+                masks, _, _, _ = model.forward_tta(ref, tgt)
             else:
-                masks, _, _ = model(ref, tgt)
+                masks, _, _, _ = model(ref, tgt)
         pred = F.interpolate(masks, mask.shape[-2:], mode="bilinear", align_corners=False)
         all_preds.append(pred.sigmoid().cpu())
         all_gts.append(mask.cpu())
@@ -381,6 +448,23 @@ def main():
                    help="Use soft (fractional) per-patch GT density in [0,1] for "
                         "the latent change-map BCE, instead of binary >0.3 threshold. "
                         "Preserves boundary ambiguity. Expected +0.2-0.4 F1.")
+    p.add_argument("--w_aux_latent", type=float, default=0.0,
+                   help="Weight on multi-scale auxiliary latent loss (deep supervision "
+                        "from bridge intermediates at 64/128/256). 0 disables. "
+                        "Try 0.2 first. Expected +0.3-0.5 F1.")
+    # Tier-1 latent-space ablations
+    p.add_argument("--bidir_attn", action="store_true",
+                   help="Use bidirectional cross-attention (avg of ref→tgt and tgt→ref). "
+                        "Enforces symmetry of binary CD. Expected +0.1-0.3 F1.")
+    p.add_argument("--local_window", type=int, default=1,
+                   help="Local-window similarity in CrossChangeAttention. window=1 (default) "
+                        "is diagonal-only (current behaviour). window=3 takes max over a "
+                        "3x3 spatial window — robust to small registration shifts. "
+                        "Expected +0.3-0.5 F1, esp on S2Looking.")
+    p.add_argument("--latent_loss", default="bce", choices=["bce", "mse", "lovasz"],
+                   help="Loss type for the patch-level latent change map. 'bce' (default) "
+                        "is the legacy binary cross-entropy. 'mse' is patch-density "
+                        "regression. 'lovasz' directly optimises IoU.")
     p.add_argument("--no_ohem", action="store_true", help="Disable OHEM for BCE loss")
     p.add_argument("--ohem_ratio", type=float, default=0.7,
                    help="OHEM: fraction of hardest pixels to keep (default: 0.7)")
@@ -511,6 +595,8 @@ def main():
         ckpt_dir=ckpt_dir,
         finetune_decoder=args.finetune_decoder,
         decoder_lr_scale=args.decoder_lr_scale,
+        bidir_attn=args.bidir_attn,
+        local_window=args.local_window,
         sam2_checkpoint=sam2_ckpt,
         sam2_config=sam2_cfg,
     ).to(device)
@@ -580,6 +666,8 @@ def main():
             use_ohem=not args.no_ohem,
             ohem_ratio=args.ohem_ratio,
             latent_soft=args.latent_soft,
+            w_aux_latent=args.w_aux_latent,
+            latent_loss_type=args.latent_loss,
             ema=ema,
         )
         scheduler.step()
