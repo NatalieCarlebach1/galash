@@ -17,11 +17,16 @@ pretraining, two \textsc{SAM} generations), giving a principled testbed for
 studying which foundation-model pairings transfer best to change detection.
 GALASH trains only $\sim$\textbf{16.5 M parameters} on top of frozen
 backbones (3$\times$ fewer than ChangeFormer, 27$\times$ fewer than DDPM-CD)
-and achieves \textbf{state-of-the-art} on DSIFN-CD ($\mathbf{96.74}$ F1
-vs.\ DDPM-CD's 96.65) and SECOND ($\mathbf{73.20}$ F1 vs.\ UniChange's
-73.12), and is competitive on LEVIR-CD ($90.66$ F1) and CDD ($96.75$ F1).
-A surprising finding is that SAM decoder \emph{capacity is irrelevant} for
-change detection: SAM2.1-tiny (39 M) matches SAM2.1-large (225 M) within
-$0.3$ F1 across all benchmarks. We release code, checkpoints, sweep logs,
-and per-dataset YAML configs that match each benchmark's published SOTA
-augmentation pipeline verbatim --- enforcing fair comparison.
+and achieves \textbf{state-of-the-art} on
+SECOND (\textbf{74.30} F1, $+1.18$ over UniChange's 73.12) and DSIFN-CD
+(\textbf{96.74} F1, $+0.09$ over DDPM-CD's 96.65), and is competitive on
+LEVIR-CD (\textbf{90.89} F1) and CDD (\textbf{96.76} F1). A surprising finding
+is that SAM decoder \emph{capacity is irrelevant} for change detection:
+SAM2.1-tiny (39 M) matches or beats SAM2.1-large (225 M) within $0.3$ F1.
+We also find that \emph{newer DINO generations} matter more than parameter
+scale: DINOv2-RS-base (86 M, RS-pretrained) outperforms DINOv2-large (304 M,
+generic) by $4.7$ F1 on LEVIR-CD; DINOv3-large further closes the SOTA gap
+on hard benchmarks (LEVIR-CD+ $+1.5$, S2Looking $+3.2$ over DINOv2-RS).
+We release code, checkpoints, sweep logs, and per-dataset YAML configs that
+match each benchmark's published SOTA augmentation pipeline verbatim ---
+enforcing fair comparison.

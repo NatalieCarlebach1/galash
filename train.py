@@ -465,6 +465,15 @@ def main():
                    help="Loss type for the patch-level latent change map. 'bce' (default) "
                         "is the legacy binary cross-entropy. 'mse' is patch-density "
                         "regression. 'lovasz' directly optimises IoU.")
+    # LoRA — Low-Rank Adaptation
+    p.add_argument("--lora_rank", type=int, default=0,
+                   help="LoRA rank. 0 = disabled. Try 8 or 16 (TTP uses 8 on SAM ViT-H).")
+    p.add_argument("--lora_target", default="none",
+                   choices=["none", "dino", "sam", "both"],
+                   help="Where to inject LoRA. 'dino' = encoder Q/K/V/O attention; "
+                        "'sam' = SAM decoder attention projections; 'both'.")
+    p.add_argument("--lora_alpha", type=float, default=16.0,
+                   help="LoRA alpha (scaling). Effective scaling = alpha / rank.")
     p.add_argument("--no_ohem", action="store_true", help="Disable OHEM for BCE loss")
     p.add_argument("--ohem_ratio", type=float, default=0.7,
                    help="OHEM: fraction of hardest pixels to keep (default: 0.7)")
@@ -597,6 +606,9 @@ def main():
         decoder_lr_scale=args.decoder_lr_scale,
         bidir_attn=args.bidir_attn,
         local_window=args.local_window,
+        lora_rank=args.lora_rank,
+        lora_target=args.lora_target,
+        lora_alpha=args.lora_alpha,
         sam2_checkpoint=sam2_ckpt,
         sam2_config=sam2_cfg,
     ).to(device)
@@ -728,6 +740,13 @@ def main():
             ckpt["sam_decoder"] = model.sam_decoder.state_dict()
         if ema is not None:
             ckpt["ema_shadow"] = ema.state_dict()
+        # LoRA: save only the trainable lora_A / lora_B params (small).
+        if args.lora_rank > 0:
+            ckpt["lora_state"] = {
+                n: p.detach().cpu().clone()
+                for n, p in model.named_parameters()
+                if p.requires_grad and ("lora_A" in n or "lora_B" in n)
+            }
         torch.save(ckpt, os.path.join(run_dir, "last.pt"))
         if is_best:
             torch.save(ckpt, os.path.join(run_dir, "best.pt"))

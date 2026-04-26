@@ -17,12 +17,86 @@ Supported decoders:
   - SAM3: single variant (848M, uses HF download)
 """
 
+import math
 import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# LoRA — Low-Rank Adaptation (Hu et al. 2021)
+# ---------------------------------------------------------------------------
+class LoRALinear(nn.Module):
+    """Wraps an nn.Linear, freezing the original weights and adding a low-rank
+    additive delta (lora_B @ lora_A · x · scaling). Memory cost: rank·(in+out)
+    extra params; compute cost: tiny extra matmul.
+
+    On init, lora_A is Kaiming-uniform and lora_B is zero — so the LoRA delta
+    starts at exactly 0, preserving the frozen network's initial behaviour.
+    """
+
+    def __init__(self, base: nn.Linear, rank: int = 8, alpha: float = 16.0,
+                 dropout: float = 0.0):
+        super().__init__()
+        self.base = base
+        for p in self.base.parameters():
+            p.requires_grad = False
+        in_f = base.in_features
+        out_f = base.out_features
+        self.rank = rank
+        self.scaling = alpha / max(rank, 1)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        # (rank, in_f) and (out_f, rank) so the delta is lora_B @ lora_A
+        self.lora_A = nn.Parameter(torch.zeros(rank, in_f))
+        self.lora_B = nn.Parameter(torch.zeros(out_f, rank))
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        # B initialised to zero → delta = 0 at start (identity behaviour)
+
+    def forward(self, x: Tensor) -> Tensor:
+        # base(x): the frozen linear; LoRA delta added on top
+        out = self.base(x)
+        delta = (self.dropout(x) @ self.lora_A.transpose(0, 1)) @ self.lora_B.transpose(0, 1)
+        return out + self.scaling * delta
+
+
+# DINOv2 attention layers (HuggingFace ViTModel interface)
+DINO_LORA_TARGETS = ("attention.query", "attention.key", "attention.value",
+                     "attention.output.dense")
+# SAM2/SAM1 mask-decoder + prompt-encoder attention projections
+SAM_LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "out_proj")
+
+
+def _matches_suffix(name: str, suffixes: Iterable[str]) -> bool:
+    """True if the qualified module name ends with any of the suffixes."""
+    return any(name == s or name.endswith("." + s) for s in suffixes)
+
+
+def inject_lora(root: nn.Module, suffixes: Iterable[str], rank: int = 8,
+                alpha: float = 16.0, dropout: float = 0.0) -> int:
+    """Walk `root`, replace every nn.Linear whose qualified name ends with one
+    of `suffixes` with a LoRALinear wrapper. Returns count of injected layers."""
+    to_replace = []
+    for name, module in root.named_modules():
+        if isinstance(module, nn.Linear) and _matches_suffix(name, suffixes):
+            to_replace.append(name)
+
+    n = 0
+    for qualified in to_replace:
+        # navigate to leaf parent
+        parts = qualified.split(".")
+        parent = root
+        for p in parts[:-1]:
+            parent = getattr(parent, p)
+        leaf_name = parts[-1]
+        old = getattr(parent, leaf_name)
+        if isinstance(old, LoRALinear):
+            continue
+        setattr(parent, leaf_name, LoRALinear(old, rank=rank, alpha=alpha, dropout=dropout))
+        n += 1
+    return n
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -457,6 +531,10 @@ class ChangeDetector(nn.Module):
         # Tier-1 latent-space ablations
         bidir_attn: bool = False,
         local_window: int = 1,
+        # LoRA
+        lora_rank: int = 0,
+        lora_target: str = "none",
+        lora_alpha: float = 16.0,
         # Backward compat: direct HF/path overrides
         dino_model_name: Optional[str] = None,
         sam2_checkpoint: Optional[str] = None,
@@ -511,6 +589,29 @@ class ChangeDetector(nn.Module):
         for p in self.sam_prompt_enc.parameters():
             p.requires_grad = False
         self.sam_prompt_enc.eval()
+
+        # ── LoRA injection ────────────────────────────────────────────
+        # Adds rank-r low-rank adapters to attention projections of the
+        # frozen DINO encoder and/or SAM mask decoder. lora_target ∈
+        # {none, dino, sam, both}. Default is none = no change.
+        self.lora_rank = lora_rank
+        self.lora_target = lora_target
+        if lora_rank > 0 and lora_target in ("dino", "both"):
+            n_dino = inject_lora(self.dino, DINO_LORA_TARGETS,
+                                 rank=lora_rank, alpha=lora_alpha)
+            print(f"  LoRA injected into DINO encoder: {n_dino} layers, rank={lora_rank}")
+        if lora_rank > 0 and lora_target in ("sam", "both"):
+            # If full FT was on, LoRA is redundant — disable to keep
+            # parameter count honest. User gets a warning.
+            if finetune_decoder:
+                print("  ⚠ LoRA on SAM + --finetune_decoder both set; "
+                      "disabling full FT to avoid double-training.")
+                for p in self.sam_decoder.parameters():
+                    p.requires_grad = False
+                self.sam_decoder.eval()
+            n_sam = inject_lora(self.sam_decoder, SAM_LORA_TARGETS,
+                                rank=lora_rank, alpha=lora_alpha)
+            print(f"  LoRA injected into SAM decoder: {n_sam} layers, rank={lora_rank}")
 
         # ── Bridge (TRAINABLE) — adapts based on decoder family ──────
         use_high_res = self.decoder_family in ("sam2", "sam3")
@@ -645,21 +746,35 @@ class ChangeDetector(nn.Module):
 
     # -------- convenience --------
     def trainable_parameters(self):
-        yield from self.cross_attn.parameters()
-        yield from self.bridge.parameters()
-        if self.finetune_decoder:
-            yield from self.sam_decoder.parameters()
+        """All params with requires_grad=True. LoRA-aware: includes lora_A/B
+        deltas that live inside the otherwise-frozen DINO and SAM modules."""
+        for p in self.parameters():
+            if p.requires_grad:
+                yield p
+
+    def _named_lora_params(self):
+        for name, p in self.named_parameters():
+            if p.requires_grad and ("lora_A" in name or "lora_B" in name):
+                yield name, p
 
     def param_groups(self, lr: float):
-        groups = [
-            {"params": list(self.cross_attn.parameters()) + list(self.bridge.parameters()),
-             "lr": lr},
-        ]
+        # Bridge + cross_attn at full LR (always main lr).
+        main = list(self.cross_attn.parameters()) + list(self.bridge.parameters())
+        groups = [{"params": main, "lr": lr}]
+
+        # SAM decoder full FT at decoder_lr_scale × lr (legacy).
         if self.finetune_decoder:
-            groups.append({
-                "params": list(self.sam_decoder.parameters()),
-                "lr": lr * self.decoder_lr_scale,
-            })
+            sam_decoder_full = [p for n, p in self.sam_decoder.named_parameters()
+                                if p.requires_grad and "lora_" not in n]
+            if sam_decoder_full:
+                groups.append({"params": sam_decoder_full,
+                               "lr": lr * self.decoder_lr_scale})
+
+        # LoRA params get their own group at the same LR scale as bridge —
+        # standard practice for LoRA fine-tuning.
+        lora_params = [p for _, p in self._named_lora_params()]
+        if lora_params:
+            groups.append({"params": lora_params, "lr": lr})
         return groups
 
     def train(self, mode: bool = True):

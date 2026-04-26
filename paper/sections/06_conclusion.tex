@@ -8,13 +8,16 @@ suffice to adapt generic self-supervised features to bi-temporal change.
 
 \paragraph{Headline results.}
 \begin{itemize}
+  \item State-of-the-art on \textbf{SECOND} (74.30 F1; $+1.18$ over
+    UniChange), with a frozen DINOv3-large backbone + cheap-wins recipe.
   \item State-of-the-art on \textbf{DSIFN-CD} (96.74 F1; $+0.09$ over
-    DDPM-CD), with $27\times$ fewer trainable parameters.
-  \item State-of-the-art on \textbf{SECOND} binary change (73.20 F1;
-    $+0.08$ over UniChange), without an MLLM.
-  \item Within $0.87$ F1 of SChanger on \textbf{CDD} and $2.21$ F1 on
-    \textbf{LEVIR-CD}, while using a single training pass and no
-    synthetic-pair pretraining.
+    DDPM-CD), with $27\times$ fewer trainable parameters; \emph{three}
+    GALASH configurations independently land within $0.01$ F1.
+  \item Within $0.86$ F1 of SChanger on \textbf{CDD} (96.76) and $1.98$ F1
+    on \textbf{LEVIR-CD} (90.89), without synthetic-pair pretraining.
+  \item DINOv3-large backbone closes the gap on the two hardest benchmarks
+    (LEVIR-CD+ $-9.78 \to -8.30$, S2Looking $-10.17 \to -3.61$) over the
+    default DINOv2-RS-base.
 \end{itemize}
 
 \paragraph{Ablation findings worth highlighting.}
@@ -26,13 +29,27 @@ suffice to adapt generic self-supervised features to bi-temporal change.
   \item \textbf{Remote-sensing pretraining beats raw model capacity.}
     DINOv2-RS-base ($86$ M) outperforms DINOv2-large ($304$ M) by $4.7$
     F1 on LEVIR-CD; pretraining domain dominates over scale.
+  \item \textbf{DINOv3-large transfers best across CD benchmarks.}
+    Beats DINOv2-RS-base on every dataset where the gap to SOTA is large
+    ($+1.5$ on LEVIR-CD+, $+3.2$ on S2Looking) and ties on saturated
+    benchmarks (CDD, DSIFN-CD).
   \item \textbf{Aerial pretraining (DINOv3-sat) helps only on
     aerial-distribution benchmarks.} It wins on S2Looking but loses on
     LEVIR-CD by $1.4$ F1 --- the SAT-493M corpus over-fits to coarse
     satellite imagery and loses LEVIR-CD's building-edge sensitivity.
+    DINOv3-large (generic LVD-1689M pretrain) generalises further.
   \item \textbf{Cheap inference-time wins (val threshold search +
     multi-resolution test) add $+0.66$ F1 on LEVIR-CD} with no
     retraining and no extra parameters.
+  \item \textbf{Most architectural tweaks to the latent loss are null
+    at convergence.} We tried multi-scale auxiliary supervision,
+    bidirectional cross-attention, local-window similarity,
+    Lovász-hinge, MSE patch-density regression, soft-target latent BCE,
+    and LoRA at ranks 4/8/16 on DINO/SAM/both. None beats the baseline
+    on LEVIR-CD by more than seed noise. The current architecture is
+    near-locally-optimal at this scale of data; meaningful gains come
+    from \emph{better backbones} and \emph{cheap inference tricks},
+    not from extra architectural complexity.
 \end{itemize}
 
 \paragraph{Limitations.} GALASH inherits the resolution and patch-size

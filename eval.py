@@ -214,15 +214,22 @@ def main():
 
     # ── model ──
     print("Loading model …")
-    # Tier-1 latent-space args may be embedded in the saved ckpt['args'] —
-    # auto-pick them up if present so eval matches training architecture.
+    # Tier-1 latent-space + LoRA args may be embedded in the saved ckpt['args']
+    # — auto-pick them up so eval matches training architecture.
     bidir_attn = False
     local_window = 1
-    saved_args = (torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-                  .get('args', {}) if os.path.isfile(args.checkpoint) else {})
+    lora_rank = 0
+    lora_target = "none"
+    lora_alpha = 16.0
+    saved_ckpt = (torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+                  if os.path.isfile(args.checkpoint) else {})
+    saved_args = saved_ckpt.get('args', {}) if isinstance(saved_ckpt, dict) else {}
     if isinstance(saved_args, dict):
         bidir_attn = bool(saved_args.get('bidir_attn', False))
         local_window = int(saved_args.get('local_window', 1))
+        lora_rank = int(saved_args.get('lora_rank', 0))
+        lora_target = saved_args.get('lora_target', 'none')
+        lora_alpha = float(saved_args.get('lora_alpha', 16.0))
 
     model = ChangeDetector(
         encoder=encoder_name,
@@ -231,6 +238,9 @@ def main():
         finetune_decoder=args.finetune_decoder,
         bidir_attn=bidir_attn,
         local_window=local_window,
+        lora_rank=lora_rank,
+        lora_target=lora_target,
+        lora_alpha=lora_alpha,
         sam2_checkpoint=args.sam2_ckpt,
         sam2_config=args.sam2_cfg,
     ).to(device)
@@ -240,6 +250,15 @@ def main():
     model.cross_attn.load_state_dict(ckpt["cross_attn"])
     if args.finetune_decoder and "sam_decoder" in ckpt:
         model.sam_decoder.load_state_dict(ckpt["sam_decoder"])
+    # Restore LoRA params (lora_A / lora_B) into their host modules.
+    if "lora_state" in ckpt:
+        named = dict(model.named_parameters())
+        n_loaded = 0
+        for n, t in ckpt["lora_state"].items():
+            if n in named and named[n].shape == t.shape:
+                named[n].data.copy_(t.to(named[n].device))
+                n_loaded += 1
+        print(f"  loaded LoRA params: {n_loaded}/{len(ckpt['lora_state'])}")
     # Optional EMA swap-in
     if args.use_ema and "ema_shadow" in ckpt:
         print("  loading EMA shadow weights")
