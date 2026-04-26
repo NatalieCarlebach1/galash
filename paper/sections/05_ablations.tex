@@ -15,19 +15,75 @@ Table~\ref{tab:loss-ablation} removes one loss component at a time.
   \centering
   \small
   \caption{Loss-component ablations on LEVIR-CD test (F1 / IoU).
-    \emph{tbd} = job in flight at submission time.}
+    All numbers are real test-set evaluations of the corresponding training
+    runs (jobs \texttt{abl\_*} 2026-04-25).}
   \label{tab:loss-ablation}
   \begin{tabular}{lcc}
     \toprule
     Configuration & F1 & IoU \\
     \midrule
     Full GALASH (BCE+OHEM, Dice, IoU-MSE, latent)              & \textbf{90.45} & \textbf{82.56} \\
-    \quad w/o latent change loss ($w_\text{lat}{=}0$)          & \emph{tbd}     & \emph{tbd}     \\
-    \quad w/o OHEM in BCE                                      & \emph{tbd}     & \emph{tbd}     \\
-    \quad w/o TTA at test                                      & \emph{tbd}     & \emph{tbd}     \\
+    \quad w/o latent change loss ($w_\text{lat}{=}0$)          & 89.84 & 81.55 \\
+    \quad w/o OHEM in BCE                                      & 90.13 & 82.03 \\
+    \quad w/o TTA at test                                      & 89.74 & 81.40 \\
     \bottomrule
   \end{tabular}
 \end{table}
+
+The latent change loss contributes $+0.61$ F1, OHEM contributes $+0.32$,
+and TTA at test contributes $+0.71$ --- consistent with the design choices
+in \S\ref{sec:loss}.
+
+\subsection{Things that do NOT help (negative-result table)}
+\label{sec:negative-results}
+
+We tested seven independent architectural and loss-side modifications,
+each motivated by results in adjacent literature (Lovász --- ChangeStar;
+LoRA --- TTP; multi-scale aux supervision --- ChangeFormer; bidirectional
++ local-window similarity --- our own derivations). All are \emph{null
+or slightly negative} at convergence on LEVIR-CD test (Table~\ref{tab:negative}).
+
+\begin{table}[h]
+  \centering
+  \small
+  \caption{Architectural / loss variants tried on LEVIR-CD that did not
+    beat the baseline. Same training budget (300 epochs, patience 15)
+    and config as the default GALASH ($90.45$ F1).}
+  \label{tab:negative}
+  \begin{tabular}{lcc}
+    \toprule
+    Variant & F1 & $\Delta$ vs baseline \\
+    \midrule
+    Multi-scale aux supervision ($w_\text{aux}{=}0.1$, best of 5 weights) & 90.27 & $-0.18$ \\
+    Soft (continuous) latent target & 90.10 & $-0.35$ \\
+    Bidirectional cross-attention & 90.14 & $-0.31$ \\
+    Local-window ($3{\times}3$) similarity & 89.84 & $-0.61$ \\
+    Lov\'asz patch-level latent loss & 89.72 & $-0.73$ \\
+    MSE patch-density regression & 89.53 & $-0.92$ \\
+    \midrule
+    LoRA (rank 8) on DINO encoder                & 90.36 & $-0.09$ \\
+    LoRA (rank 8) on SAM mask decoder            & 90.26 & $-0.19$ \\
+    LoRA (rank 4) on both DINO and SAM           & 89.95 & $-0.50$ \\
+    LoRA (rank 16) on DINO encoder               & 89.69 & $-0.76$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The LoRA result is particularly notable. TTP~\citep{chen2024ttp} uses LoRA
+on SAM ViT-Huge and reaches $92.10$ F1 on LEVIR-CD; we hypothesised that
+the same trick on our DINO + SAM bridge would close the $-1.98$ pp gap to
+SChanger. It does not. We attribute this to architectural difference: TTP
+uses LoRA on the SAM image encoder (where the change-detection adaptation
+happens in their pipeline), whereas in GALASH the cross-change attention
+and Bridge v2 are the locus of adaptation, and LoRA on the encoder/decoder
+adds capacity where it is not the bottleneck.
+
+The broader pattern is clear: at this scale of training data and with the
+existing GALASH architecture, the benefit of additional architectural
+sophistication is dominated by seed noise. Real gains come from
+\emph{better backbones} (DINOv3-large; \S\ref{sec:enc-sweep}) and
+\emph{cheap inference-time tricks} (multi-resolution test, val-tuned
+threshold; \S\ref{sec:cheap-wins}).
 
 \subsection{Augmentation-pipeline ablation}
 

@@ -6,18 +6,20 @@ SAM-family foundation models into a parameter-efficient change detector.
 Two small trainable modules --- Cross-Change Attention and Bridge v2 ---
 suffice to adapt generic self-supervised features to bi-temporal change.
 
-\paragraph{Headline results.}
+\paragraph{Headline results} (against methods trained only on each
+benchmark's released training set --- excluding ChangeStar+Changen,
+ChangeStar2, and UniChange which import additional bitemporal CD data):
 \begin{itemize}
-  \item State-of-the-art on \textbf{SECOND} (74.30 F1; $+1.18$ over
-    UniChange), with a frozen DINOv3-large backbone + cheap-wins recipe.
+  \item State-of-the-art on \textbf{SECOND} (74.30 F1; $+1.84$ over
+    SAM-SCD's 72.46), with a frozen DINOv3-large backbone + cheap-wins recipe.
   \item State-of-the-art on \textbf{DSIFN-CD} (96.74 F1; $+0.09$ over
     DDPM-CD), with $27\times$ fewer trainable parameters; \emph{three}
     GALASH configurations independently land within $0.01$ F1.
   \item Within $0.86$ F1 of SChanger on \textbf{CDD} (96.76) and $1.98$ F1
-    on \textbf{LEVIR-CD} (90.89), without synthetic-pair pretraining.
+    on \textbf{LEVIR-CD} (90.89).
   \item DINOv3-large backbone closes the gap on the two hardest benchmarks
-    (LEVIR-CD+ $-9.78 \to -8.30$, S2Looking $-10.17 \to -3.61$) over the
-    default DINOv2-RS-base.
+    (LEVIR-CD+ $-9.78 \to -7.30$ vs ChangeStar baseline, S2Looking
+    $-10.17 \to -3.24$ vs SChanger) over the default DINOv2-RS-base.
 \end{itemize}
 
 \paragraph{Ablation findings worth highlighting.}

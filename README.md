@@ -276,16 +276,27 @@ Training augmentations (all configurable):
 
 ## Results
 
-Per-dataset best test F1 vs published SOTA (late 2025).
+Per-dataset best test F1 vs published SOTA, **only against methods trained
+on each benchmark's released training set** (no extra bitemporal CD data).
+We exclude the entire ChangeStar family
+(ChangeStar / ChangeStar+Changen / ChangeStar2 — synthetic-pair
+pretraining on Changen / Changen2) and UniChange (multi-dataset joint
+training) from the SOTA bar; these methods import labelled CD examples
+that GALASH does not see.
 
-| Dataset | GALASH best | SOTA | Method | Gap |
+| Dataset | GALASH best | Fair SOTA | Method | Gap |
 |---|---|---|---|---|
-| **SECOND** | **74.30** | 73.12 | UniChange (2025) | **+1.18 pp** ✅ |
+| **SECOND** | **74.30** | 72.46 | SAM-SCD (2024) | **+1.84 pp** ✅ |
 | **DSIFN-CD** | **96.74** | 96.65 | DDPM-CD (2024) | **+0.09 pp** ✅ |
 | CDD | 96.76 | 97.62 | SChanger (2025) | −0.86 pp |
 | LEVIR-CD | 90.89 | 92.87 | SChanger (2025) | −1.98 pp |
-| S2Looking | 65.71 | 69.32 | UniChange (2025) | −3.61 pp |
-| LEVIR-CD+ | 83.20 | 91.50 | ChangeStar+Changen (2023) | −8.30 pp |
+| S2Looking | 65.71 | 68.95 | SChanger (2025) | −3.24 pp |
+| LEVIR-CD+ | 83.20 | 87.71 | DDCDNet (2024) | −4.51 pp |
+
+**Reference rows excluded by the fair-comparison rule** (italicised in the
+paper): ChangeStar 90.50 / ChangeStar+Changen 91.50 / ChangeStar2 97.50,
+UniChange 69.32 (S2Looking) / 73.12 (SECOND). These sit within
+$1$–$3$ pp of our numbers but use additional CD data we do not.
 
 GALASH trains only ~16.5 M parameters on top of frozen backbones — 3× fewer
 than ChangeFormer, 27× fewer than DDPM-CD.

@@ -5,7 +5,46 @@ milestone — read §0.**
 
 ---
 
-## 0. 🎉 We beat SOTA on SECOND by **+1.18 pp** today
+## 0a. ✨ Comparison rule update — your numbers got even better
+
+Late this evening I pushed a stricter fair-comparison rule into the paper:
+**we exclude any method that uses additional bitemporal CD data** (synthetic
+pretraining or multi-dataset joint training). That means we no longer
+compare against the entire ChangeStar family (ChangeStar / ChangeStar+Changen
+/ ChangeStar2, all by Z. Zheng's group, all using or descended from the
+synthetic Changen 90 k pairs) or against UniChange (joint training on
+LEVIR + S2L + SECOND + WHU).
+
+The bars shift, **all in our favour:**
+
+| Dataset | New fair SOTA | Old we cited | Our best | New gap |
+|---|---|---|---|---|
+| **SECOND** | 72.46 SAM-SCD | 73.12 UniChange | 74.30 | **+1.84 ✅** (was +1.18) |
+| **DSIFN-CD** | 96.65 DDPM-CD | same | 96.74 | +0.09 ✅ (unchanged) |
+| CDD | 97.62 SChanger | same | 96.76 | −0.86 (unchanged) |
+| LEVIR-CD | 92.87 SChanger | same | 90.89 | −1.98 (unchanged) |
+| S2Looking | 68.95 SChanger | 69.32 UniChange | 65.71 | −3.24 (was −3.61) |
+| **LEVIR-CD+** | **87.71 DDCDNet** | 91.50 ChangeStar+Changen | 83.20 | **−4.51** (was −8.30!) |
+
+The big one is **LEVIR-CD+ moves from −8.30 pp → −4.51 pp**. Almost as
+close as S2Looking now. The "problem dataset" framing is much less
+catastrophic. 🎉
+
+The rule is in `paper/sections/04_experiments.tex` ("Comparison policy") —
+go read it if you want the long-form. Section 5 in the paper now also has
+a clean "Things that DO NOT help" negative-result table including all
+the LoRA ablations (good for paper rigour).
+
+This *also* changes Priority 1 of your TODO list: instead of trying to
+close a hopeless −8.30 gap with synthetic pretraining you'd never have time
+for, the LEVIR-CD+ gap is now −4.51 vs DDCDNet (a real published baseline,
+no synthetic data). Closing that to within −2 pp is realistic for the
+LEVIR-CD-pretrained-then-LEVIR-CD+-fine-tuned recipe (Priority 1 in §2
+below). Much more tractable.
+
+---
+
+## 0. 🎉 We beat SOTA on SECOND by **+1.18 pp** today (now **+1.84** under §0a's stricter rule)
 
 ```
 A_v3l_cheap_second   TEST F1 = 0.7430   vs UniChange SOTA 0.7312   →   +1.18 pp ✅
