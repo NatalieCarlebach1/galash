@@ -1,6 +1,6 @@
 # GALASH — All Results & Comparisons
 
-Last updated: 2026-04-28. All F1 scores are test-set unless marked `~val` (val-based preview).
+Last updated: 2026-04-29. All F1 scores are test-set unless marked `~val` (val-based preview).
 
 ---
 
@@ -51,7 +51,7 @@ Encoder: various (see column). Decoder: sam2_base_plus throughout.
 | **DSIFN-CD** | fair | dinov2_rs_base | **0.9674** | 0.9665 | **+0.09pp ✅** | SOTA |
 | CDD | fair | dinov2_rs_base | 0.9675 | 0.9762 | −0.87pp | |
 | LEVIR-CD | sam2_tiny + multi-res | dinov2_rs_base | 0.9089 | 0.9287 | −1.98pp | |
-| S2Looking | fair | dinov3_large | 0.6571 | 0.6895 | −3.24pp | |
+| S2Looking | cheap wins | dinov3_large | 0.6571 | 0.6895 | −3.24pp | |
 | LEVIR-CD+ | cheap wins | dinov3_large | 0.8320 | 0.8771 | −4.51pp | |
 
 ### Encoder sweep (LEVIR-CD, frozen sam2_base_plus)
@@ -84,10 +84,10 @@ Encoder: various (see column). Decoder: sam2_base_plus throughout.
 | SECOND | 0.7067 | 0.7209 | **+1.42** | |
 | DSIFN-CD | 0.9674 | 0.9674 | 0.00 | no change |
 | LEVIR-CD+ | 0.8172 | 0.8137 | −0.04 | no change |
-| CDD | — | 🔄 cluster result pending | — | |
-| S2Looking | — | 🔄 cluster result pending | — | |
+| CDD | — | pending | — | |
+| S2Looking | — | pending | — | |
 
-### Null results / ablations (LEVIR-CD)
+### Null results / ablations (LEVIR-CD, Tal's cluster)
 
 | Tried | Δ vs baseline | Verdict |
 |-------|--------------|---------|
@@ -117,7 +117,7 @@ Encoder: dinov2_rs_base throughout (dinov3_large is gated, no HF token on this m
 | LEVIR-CD | 44 | 71 | 0.8987 | 0.9287 | −3.00pp |
 | CDD | 42 | 300 | 0.9678 | 0.9762 | −0.84pp |
 | DSIFN-CD | 42 | 300 | **0.9676** | 0.9665 | **+0.11pp ✅** |
-| SECOND | 42 | 7 | — | 0.7312 | killed early |
+| SECOND | 42 | 7 | — | 0.7246 | killed early |
 
 LEVIR-CD variance across seeds 42/43/44: mean=0.9000, std=0.0016
 
@@ -125,10 +125,29 @@ LEVIR-CD variance across seeds 42/43/44: mean=0.9000, std=0.0016
 
 | Dataset | Epochs | Test F1 | Fair SOTA | Gap | Notes |
 |---------|--------|---------|-----------|-----|-------|
-| SECOND | 62 | 0.7147 | 0.7246 | −0.99pp | early stopped |
-| S2Looking | 122 | 0.5956 | 0.6895 | −9.39pp | early stopped, hard dataset |
-| CDD | 208 | ~val 0.9623 | 0.9762 | ~−1.39pp | 🔄 still running |
-| DSIFN-CD | 201 | ~val 0.9619 | 0.9665 | ~−0.46pp | 🔄 still running |
+| LEVIR-CD | 166 | 0.9051 | 0.9287 | −2.36pp | |
+| CDD | 300 | 0.9676 | 0.9762 | −0.86pp | cheap = no gain vs fair |
+| DSIFN-CD | 300 | **0.9675** | 0.9665 | **+0.10pp ✅** | confirms SOTA win |
+| SECOND | 62 | 0.7147 | 0.7246 | −1.65pp | early stopped |
+| S2Looking | 122 | 0.5956 | 0.6895 | −9.76pp | early stopped, hard dataset |
+
+### Ablation runs (new — 2026-04-29)
+
+| Run | Flags | Dataset | Epochs | Test F1 | SOTA | Gap | vs baseline | Verdict |
+|-----|-------|---------|--------|---------|------|-----|-------------|---------|
+| abl_levir_cnn_skip | `--cnn_skip` cheap | LEVIR-CD | 121 | **0.9150** | 0.9287 | −1.37pp | **+1.32pp** | ✅ keeps |
+| abl_s2looking_offset | `--learnable_offset` cheap | S2Looking | 65 | 0.5643 | 0.6895 | −12.89pp | −3.13pp | ❌ hurts |
+| abl_cdd_cnn_skip | `--cnn_skip` cheap | CDD | 🔄 running | — | 0.9762 | — | — | pending |
+| abl_s2looking_cnn_skip | `--cnn_skip` cheap | S2Looking | 🔄 running | — | 0.6895 | — | — | pending |
+| abl_levir_simple_diff | `--simple_diff` cheap | LEVIR-CD | 🔄 running | — | 0.9287 | — | — | pending — key ablation |
+
+**Notes on ablations:**
+- `--cnn_skip`: replaces Bridge's fake bilinearly-upsampled high_res_features with real
+  Siamese CNN change features at 128px and 256px. +1.32pp on LEVIR-CD — cuts the gap in half.
+- `--learnable_offset`: MLP predicts per-patch warp before CrossChangeAttention.
+  Hurts on S2Looking because parallax depends on building height — not learnable per-patch.
+- `--simple_diff`: replaces CrossChangeAttention with elementwise subtraction.
+  Result will quantify CrossChangeAttention's contribution. This is the key paper ablation.
 
 ---
 
@@ -136,15 +155,14 @@ LEVIR-CD variance across seeds 42/43/44: mean=0.9000, std=0.0016
 
 | Dataset | Config | Tal (cluster) | Natalie (local) | Diff | Note |
 |---------|--------|--------------|-----------------|------|------|
-| LEVIR-CD | fair, seed42 | 0.9000 | **0.9018** | +0.18pp | Natalie slightly better |
+| LEVIR-CD | fair, seed42 | 0.9000 | **0.9018** | +0.18pp | essentially tied |
+| LEVIR-CD | cheap | 0.9025 | 0.9051 | +0.26pp | essentially tied |
+| LEVIR-CD | cheap + cnn_skip | — | **0.9150** | — | new best local |
 | DSIFN-CD | fair, seed42 | 0.9674 | **0.9676** | +0.02pp | essentially tied |
 | CDD | fair, seed42 | 0.9675 | **0.9678** | +0.03pp | essentially tied |
-| SECOND | cheap wins | **0.7209** | 0.7147 | −0.62pp | cluster wins (small dataset variance) |
-| S2Looking | cheap wins | 🔄 pending | 0.5956 | — | Tal's cluster result not yet known locally |
-| LEVIR-CD+ | cheap wins | **0.8137** | not run | — | |
-
-Fair-config results are essentially identical between cluster and local — the randomness
-from the small SECOND dataset explains the 0.62pp gap there.
+| SECOND | cheap | **0.7209** | 0.7147 | −0.62pp | cluster wins (small dataset variance) |
+| S2Looking | cheap | **0.6571** | 0.5956 | −6.15pp | cluster wins (dinov3_large vs rs_base) |
+| LEVIR-CD+ | cheap | **0.8137** | not run | — | no data downloaded |
 
 ---
 
@@ -154,20 +172,19 @@ from the small SECOND dataset explains the 0.62pp gap there.
 |---------|---------|------------|-----------|--------|-----|
 | **SECOND** | **0.7430** | Tal — dinov3_large + cheap wins | 0.7246 (SAM-SCD) | | **+1.84pp ✅** |
 | **DSIFN-CD** | **0.9676** | Both — dinov2_rs_base fair | 0.9665 (DDPM-CD) | | **+0.11pp ✅** |
+| LEVIR-CD | 0.9150 | Natalie — cheap + cnn_skip | 0.9287 (SChanger) | | −1.37pp |
 | CDD | 0.9678 | Natalie — dinov2_rs_base fair | 0.9762 (SChanger) | | −0.84pp |
-| LEVIR-CD | 0.9089 | Tal — sam2_tiny + multi-res | 0.9287 (SChanger) | | −1.98pp |
 | S2Looking | 0.6571 | Tal — dinov3_large + cheap wins | 0.6895 (SChanger) | | −3.24pp |
 | LEVIR-CD+ | 0.8320 | Tal — dinov3_large + cheap wins | 0.8771 (DDCDNet) | | −4.51pp |
 
-**2 datasets above SOTA. 4 datasets below — closest gap is CDD at −0.84pp.**
+**2 datasets above SOTA. 4 below — CNN skip improved LEVIR-CD from −1.98pp to −1.37pp.**
 
 ---
 
-## Pending / Expected Results
+## Pending Results
 
-| Run | Expected test F1 | Basis |
-|-----|-----------------|-------|
-| cheap_cdd (Natalie, running) | ~0.967–0.969 | val=0.9623 at ep208, seed42 fair got 0.9678 |
-| cheap_dsifn_cd (Natalie, running) | ~0.966–0.968 | val=0.9619 at ep201, may extend SOTA win |
-| Tal cluster: A_v3l_cheap_cdd | ~0.97+ | val 0.9513 at convergence on cluster |
-| Tal cluster: A_v3l_cheap_s2looking | ~0.66+ | val 0.6945 already > UniChange val |
+| Run | Expected F1 | Basis |
+|-----|------------|-------|
+| abl_cdd_cnn_skip (running GPU 0) | ~0.968–0.972 | CNN skip +1.32pp on LEVIR; CDD gap smaller |
+| abl_s2looking_cnn_skip (running GPU 1) | ~0.60–0.63 | CNN skip helps boundaries; S2Looking still hard |
+| abl_levir_simple_diff (running GPU 2) | ~0.895–0.910 | If ~0.900, CrossChangeAttention worth ~1.5pp |

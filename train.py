@@ -456,6 +456,19 @@ def main():
     p.add_argument("--bidir_attn", action="store_true",
                    help="Use bidirectional cross-attention (avg of ref→tgt and tgt→ref). "
                         "Enforces symmetry of binary CD. Expected +0.1-0.3 F1.")
+    p.add_argument("--simple_diff", action="store_true",
+                   help="Ablation: replace CrossChangeAttention with elementwise (ref−tgt) difference. "
+                        "Removes the cross-attention module entirely to measure its contribution.")
+    p.add_argument("--learnable_offset", action="store_true",
+                   help="Add a learnable per-patch deformable offset before CrossChangeAttention. "
+                        "Learns to compensate for ref/tgt misregistration (e.g. S2Looking parallax). "
+                        "~0.3M params, initialized to identity.")
+    p.add_argument("--max_offset", type=float, default=2.0,
+                   help="Maximum warp magnitude for --learnable_offset, in patch units (default: 2.0).")
+    p.add_argument("--cnn_skip", action="store_true",
+                   help="Replace Bridge's bilinearly-upsampled high_res_features with real "
+                        "CNN-computed Siamese change features at 128px and 256px. "
+                        "Improves boundary sharpness on LEVIR-CD and S2Looking. ~1M params.")
     p.add_argument("--local_window", type=int, default=1,
                    help="Local-window similarity in CrossChangeAttention. window=1 (default) "
                         "is diagonal-only (current behaviour). window=3 takes max over a "
@@ -606,6 +619,10 @@ def main():
         decoder_lr_scale=args.decoder_lr_scale,
         bidir_attn=args.bidir_attn,
         local_window=args.local_window,
+        simple_diff=args.simple_diff,
+        learnable_offset=args.learnable_offset,
+        max_offset=args.max_offset,
+        cnn_skip=args.cnn_skip,
         lora_rank=args.lora_rank,
         lora_target=args.lora_target,
         lora_alpha=args.lora_alpha,

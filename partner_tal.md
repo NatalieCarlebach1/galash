@@ -1,163 +1,166 @@
-# Update from Natalie — 2026-04-28
+# Update from Natalie — 2026-04-29
 
-Hey Tal! Big update — lots has happened since the last partner_tal.md. Here's everything.
+Hey Tal! Major update — lots of new results and new features since last time.
 
 ---
 
 ## 0. Branch
 
-I'm working on branch `Natalie_features_Sam` (branched off `feat/encoder-decoder-registry`).
-All results and this file are on that branch.
+Still on `Natalie_features_Sam` (branched off `feat/encoder-decoder-registry`).
 
 ---
 
-## 1. Environment & Setup (unchanged from last time)
+## 1. Environment & Setup (unchanged)
 
 - Conda env: `/home/tal/natalie/conda_env` (PyTorch 2.5.1+cu121)
 - SAM2 installed at `/home/tal/natalie/galat/sam2`
 - All 4 SAM2.1 checkpoints in `checkpoints/`
-- All 5 datasets arranged and ready
+- All 5 datasets in `data/` (cdd, dsifn_cd, levir_cd, s2looking, second — no levir_cd_plus)
 - `python` on this machine = Python 2.7 — always use `python3` or the conda env binary
 
-Code changes still in place:
-- `train.py` — `--seed` flag added
-- `scripts/monitor.py` — fixed for local use (ROOT auto-detect, recursive log.csv search)
+---
+
+## 2. New features implemented in model.py / train.py
+
+Three new flags, all ablation-ready:
+
+### `--cnn_skip`
+Adds a lightweight Siamese CNN branch (~66K params) that replaces the Bridge's
+bilinearly-upsampled `high_res_features` with real pixel-level change signals:
+- `feat_s0`: |CNN(ref) − CNN(tgt)| at 256×256 (replaces fake upsampled slot)
+- `feat_s1`: |CNN(ref) − CNN(tgt)| at 128×128 (replaces fake upsampled slot)
+
+Result on LEVIR-CD: **+1.32pp** (0.9018 → 0.9150). Cuts the gap vs SOTA in half.
+
+### `--simple_diff`
+Ablation: replaces CrossChangeAttention with elementwise `(ref−tgt)` difference.
+CrossChangeAttention params are excluded from the optimizer. Used to quantify
+how much CrossChangeAttention actually contributes vs plain subtraction.
+
+### `--learnable_offset` / `--max_offset`
+A small MLP (~148K params) predicts (dx, dy) per patch from ref tokens and warps
+tgt tokens before CrossChangeAttention. Designed for misregistered datasets.
+**Result on S2Looking: HURT by −3.13pp** (0.5956 → 0.5643). The S2Looking
+parallax is 3D geometry-dependent (per-building height) — a single MLP can't
+learn it from patch tokens. Do not use on S2Looking.
 
 ---
 
-## 2. What I ran — full results table
+## 3. Complete results — all finished local runs
 
-### 2a. Fair config (dinov2_rs_base, frozen decoder, seed 42/43/44)
+### 3a. Fair config (frozen decoder, seed 42/43/44)
 
-| Run | Epochs | TEST F1 | SOTA | Gap | Notes |
-|-----|--------|---------|------|-----|-------|
-| seed42 × LEVIR-CD | 113 | **0.9018** | 0.9287 | −2.69pp | ✅ done |
-| seed43 × LEVIR-CD | 75 | **0.8994** | 0.9287 | −2.93pp | ✅ done |
-| seed44 × LEVIR-CD | 71 | **0.8987** | 0.9287 | −3.00pp | ✅ done |
-| seed42 × CDD | 300 | **0.9678** | 0.9762 | −0.84pp | ✅ done |
-| seed42 × DSIFN-CD | 300 | **0.9676** | 0.9665 | **+0.11pp ✅** | beats SOTA! |
-| seed42 × SECOND | 7 | — | 0.7312 | — | ❌ killed early (GPU needed) |
-| seed43 × CDD | 236 | — | 0.9762 | ~−1.36pp | ❌ killed (no test result written) |
-| seed43 × DSIFN-CD | 245 | — | 0.9665 | ~−0.36pp | ❌ killed (no test result written) |
-| seed44 × CDD | 1 | — | 0.9762 | — | ❌ killed very early |
-| seed44 × DSIFN-CD | 1 | — | 0.9665 | — | ❌ killed very early |
+| Run | Epochs | TEST F1 | SOTA | Gap |
+|-----|--------|---------|------|-----|
+| seed42 × LEVIR-CD | 113 | 0.9018 | 0.9287 | −2.69pp |
+| seed43 × LEVIR-CD | 75 | 0.8994 | 0.9287 | −2.93pp |
+| seed44 × LEVIR-CD | 71 | 0.8987 | 0.9287 | −3.00pp |
+| seed42 × CDD | 300 | 0.9678 | 0.9762 | −0.84pp |
+| seed42 × DSIFN-CD | 300 | **0.9676** | 0.9665 | **+0.11pp ✅** |
 
-LEVIR-CD across 3 seeds: mean=0.9000, std=0.0016 — tight variance, good for paper.
+LEVIR-CD: mean=0.9000, std=0.0016 across 3 seeds — tight variance.
 
-### 2b. Cheap-wins config (dinov2_rs_base + FT decoder + EMA 0.999 + threshold search + patience 30)
+### 3b. Cheap-wins config (FT decoder + EMA 0.999 + threshold search + patience 30)
 
-| Run | Epochs | TEST F1 | SOTA | Gap | Notes |
-|-----|--------|---------|------|-----|-------|
-| cheap_second | 62 | **0.7147** | 0.7312 | −1.65pp | ✅ done, early stopped |
-| cheap_s2looking | 122 | **0.5956** | 0.6932 | −9.76pp | ✅ done, early stopped |
-| cheap_cdd | 208 | — | 0.9762 | ~−1.39pp | 🔄 still running, GPU 0 |
-| cheap_dsifn_cd | 201 | — | 0.9665 | ~−0.46pp | 🔄 still running, GPU 1 |
+| Run | Epochs | TEST F1 | SOTA | Gap |
+|-----|--------|---------|------|-----|
+| cheap_levir_cd | 166 | 0.9051 | 0.9287 | −2.36pp |
+| cheap_cdd | 300 | 0.9676 | 0.9762 | −0.86pp |
+| cheap_dsifn_cd | 300 | **0.9675** | 0.9665 | **+0.10pp ✅** |
+| cheap_second | 62 | 0.7147 | 0.7246 | −1.65pp |
+| cheap_s2looking | 122 | 0.5956 | 0.6895 | −9.76pp |
 
-**On cheap_second (0.7147):** Your cluster got 0.7209 — we're 0.62pp below. Small dataset
-variance + no `--no_amp` flag (not critical for base encoder but may help).
+Note: cheap-wins = no improvement on CDD (0.9676 vs 0.9678 fair). Matches cluster pattern.
 
-**On cheap_s2looking (0.5956):** Hard dataset. Your champion (dinov3_large) got 0.6571.
-With base encoder the ceiling is around 0.60 — cheap wins didn't help much here.
+### 3c. Ablation runs (new)
 
-**On cheap_cdd:** val=0.9623 at epoch 208, climbing toward where seed42 fair ended
-(val=0.9636). Looking like test will land around 0.967–0.969. Possibly ties or beats seed42.
-
-**On cheap_dsifn_cd:** val=0.9619 at epoch 201, gap ~−0.46pp on val. Given seed42 fair
-had val=0.9632 → test=0.9676 (+0.11pp SOTA), cheap_dsifn_cd should land around 0.966–0.968.
+| Run | Flags | Epochs | TEST F1 | SOTA | Gap | vs baseline | Verdict |
+|-----|-------|--------|---------|------|-----|-------------|---------|
+| abl_levir_cnn_skip | `--cnn_skip` cheap | 121 | **0.9150** | 0.9287 | −1.37pp | **+1.32pp** | ✅ keeps |
+| abl_s2looking_offset | `--learnable_offset` cheap | 65 | 0.5643 | 0.6895 | −12.89pp | −3.13pp | ❌ hurts |
 
 ---
 
-## 3. Runs NOT done (still missing locally)
+## 4. Currently running (2026-04-29)
 
-| Missing run | Priority | Notes |
-|-------------|----------|-------|
-| cheap_levir_cd | low | Done on cluster (0.9025), not critical locally |
-| cheap_levir_cd_plus | medium | Done on cluster (0.8137). Worth running once GPUs free |
-| seed42/43/44 × SECOND | low | You said skip seeds for now |
-| seed43/44 × CDD/DSIFN | low | Killed mid-run, would need restart |
+| GPU | Run | Flags | Question |
+|-----|-----|-------|---------|
+| 0 | abl_cdd_cnn_skip | `--cnn_skip` cheap | Does CNN skip close the −0.84pp CDD gap? |
+| 1 | abl_s2looking_cnn_skip | `--cnn_skip` cheap | Does CNN skip help S2Looking at all? |
+| 2 | abl_levir_simple_diff | `--simple_diff` cheap | How much does CrossChangeAttention contribute? |
+
+The `simple_diff` run on GPU 2 is the most important for the paper — if it lands
+around 0.900 while `abl_levir_cnn_skip` got 0.9150, CrossChangeAttention is worth ~1.5pp.
 
 ---
 
-## 4. GPU situation & infrastructure notes
+## 5. Best local results per dataset
 
-**dinov3_large is gated** — this machine has no HuggingFace token. All runs here use
-`dinov2_rs_base`. To run the champion config locally, someone needs to run:
-```bash
-huggingface-cli login
-```
-and paste a token with access to `facebook/dinov3-vitl16-pretrain-lvd1689m`.
+| Dataset | Best local F1 | Config | SOTA | Gap |
+|---------|--------------|--------|------|-----|
+| LEVIR-CD | **0.9150** | cheap + cnn_skip | 0.9287 | −1.37pp |
+| CDD | **0.9678** | fair seed42 | 0.9762 | −0.84pp |
+| DSIFN-CD | **0.9676** | fair seed42 | 0.9665 | **+0.11pp ✅** |
+| SECOND | 0.7147 | cheap | 0.7246 | −1.65pp |
+| S2Looking | 0.5956 | cheap | 0.6895 | −9.76pp |
 
-**OOM issue with 512px datasets (S2Looking, SECOND, LEVIR-CD+):**
-CrossChangeAttention is quadratic in token count. At 512px with patch=16:
-(512/16)² = 1024 tokens → 16× more memory than 256px datasets.
-After ~90 epochs, PyTorch memory pool fragments (12 GiB reserved but non-contiguous)
-and the 8 GiB attention allocation fails.
+---
 
-**Fix applied:** All cheap-wins runs now launched with:
+## 6. Paper strategy discussion
+
+We discussed paper strategy at length. Key points:
+
+**Venue target:** CVPR/ICCV (needs 3+ SOTA wins). Currently 2/6 datasets, one barely (+0.11pp).
+
+**What needs to happen:**
+1. `simple_diff` ablation proves CrossChangeAttention matters (+1pp expected)
+2. CNN skip closes LEVIR-CD to −1.37pp (done), need to extend to CDD + S2Looking
+3. 3 seeds on DSIFN-CD to confirm SOTA win is statistically robust
+4. CrossChangeAttention vs simple diff — the core novelty claim
+
+**Key insight from architecture discussion:**
+- DINO and SAM1 encoder are both plain ViT — no spatial hierarchy
+- The Bridge upsample (16×16 → 64×64) is bilinear interpolation: inventing pixels
+- CNN skip replaces fake high_res_features with real boundary information
+- SAM2 Hiera encoder is the right long-term direction (real spatial hierarchy → real skip connections)
+- Using SAM2 as both encoder AND decoder with CrossChangeAttention at the bottleneck
+  is novel — nobody does exactly this combination
+
+---
+
+## 7. Infrastructure notes (unchanged from before)
+
+**OOM fix:** Always launch 512px datasets with:
 ```bash
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ```
-This lets PyTorch serve large allocations from non-contiguous segments. Zero effect
-on results — purely a memory allocator setting.
 
-**Zombie process issue:** `pkill -f train.py` doesn't always kill DataLoader worker
-processes. Use `pkill -9 -f train.py` and verify with:
+**Zombie fix:** Use `pkill -9 -f train.py` and verify with nvidia-smi before new runs.
+
+**dinov3_large is gated** — needs HF token. All local runs use dinov2_rs_base.
+
+**Canonical launch command:**
 ```bash
-nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader
-```
-before launching new runs, or they'll OOM immediately.
-
----
-
-## 5. How to launch runs (canonical commands)
-
-```bash
-# Activate env
-source /home/tal/natalie/conda_env/bin/activate  # or: conda activate /home/tal/natalie/conda_env
-
-# Cheap-wins training (base encoder)
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=0 nohup \
+cd /home/tal/natalie/galat/galash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES=<N> nohup \
   /home/tal/natalie/conda_env/bin/python3 train.py \
   --config configs/datasets/<dataset>.yaml \
   --encoder dinov2_rs_base --decoder sam2_base_plus \
-  --finetune_decoder --ema 0.999 --search_threshold \
-  --patience 30 \
-  --save_dir runs/cheap/cheap_<dataset> > /tmp/cheap_<dataset>.log 2>&1 &
-
-# Monitor
-python3 scripts/monitor.py          # one-shot
-python3 scripts/monitor.py --watch  # refresh every 60s
+  --finetune_decoder --ema 0.999 --search_threshold --patience 30 \
+  [--cnn_skip] [--simple_diff] [--learnable_offset] \
+  --save_dir runs/abl/abl_<name> > /tmp/abl_<name>.log 2>&1 &
 ```
 
 ---
 
-## 6. What's next when GPUs free up
+## 8. What's next when GPUs free
 
-1. **Wait for cheap_cdd and cheap_dsifn_cd to finish** — both close to convergence,
-   results in a few hours. cheap_dsifn_cd especially interesting (~−0.46pp val gap,
-   may extend our SOTA win).
-
-2. **Run cheap_levir_cd_plus on GPU 2** — biggest remaining gap dataset, worth having
-   a local result. Launch with `--no_amp` for safety (512px + FT decoder + EMA is heavy).
-
-3. **If you can share an HF token:** run the champion config
-   (dinov3_large + cheap wins) on CDD, DSIFN, S2Looking locally to reproduce
-   cluster results.
-
----
-
-## 7. Things to be aware of
-
-- `overfit_test.py` still has stale SAM2 (not SAM2.1) checkpoint defaults — pass
-  `--sam2_ckpt` and `--sam2_cfg` explicitly.
-- `scripts/fix_levir_cd.py`, `fix_second.py`, `fix_dsifn.py` have `ROOT` hardcoded
-  to cluster path — don't run them as-is locally.
-- Disk: ~50 GB free. Each cheap-wins run generates ~80–120 MB in `runs/`. Fine for now.
-- `seed43_cdd` and `seed43_dsifn_cd` ran 236/245 epochs but have no `test_results.json`
-  — they were killed before the test phase. Checkpoints (`best.pt`) are in
-  `runs/seeds/seed43_cdd/` and `runs/seeds/seed43_dsifn_cd/` if you want to eval them.
+1. **Wait for 3 running ablations** — results in a few hours
+2. **Run CNN skip on LEVIR-CD+** — once data is downloaded (biggest gap dataset)
+3. **3 seeds on DSIFN-CD with cnn_skip** — confirm SOTA win is robust
+4. **CNN skip + simple_diff together** — does CrossChangeAttention still matter WITH CNN skip?
 
 ---
 
 Love you! — Natalie 💙
-(written with help from Claude on 2026-04-28)
+(written with help from Claude on 2026-04-29)

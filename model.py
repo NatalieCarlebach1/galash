@@ -276,6 +276,101 @@ class CrossChangeAttention(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Learnable deformable alignment  (TRAINABLE)
+# ---------------------------------------------------------------------------
+class LearnableAlignment(nn.Module):
+    """Predicts a per-patch (dx, dy) offset from ref tokens, then warps tgt
+    tokens via bilinear grid_sample before CrossChangeAttention.
+
+    Initialized to the identity (zero offsets) so training starts identical
+    to the unaligned baseline. max_offset caps the warp in patch units.
+    """
+
+    def __init__(self, dim: int, max_offset: float = 2.0):
+        super().__init__()
+        self.max_offset = max_offset
+        self.offset_net = nn.Sequential(
+            nn.Linear(dim, dim // 4), nn.GELU(),
+            nn.Linear(dim // 4, 2),
+        )
+        nn.init.zeros_(self.offset_net[-1].weight)
+        nn.init.zeros_(self.offset_net[-1].bias)
+
+    def forward(self, ref_tok: Tensor, tgt_tok: Tensor, h: int, w: int) -> Tensor:
+        B, N, D = ref_tok.shape
+        # offsets in patch units, bounded by max_offset
+        offsets = self.offset_net(ref_tok).tanh() * self.max_offset  # [B, N, 2]
+        offsets_hw = offsets.view(B, h, w, 2)  # (dy, dx) in patch units
+
+        # Base sampling grid in [-1, 1] (grid_sample convention: (x, y) = (col, row))
+        gy = torch.linspace(-1, 1, h, device=ref_tok.device)
+        gx = torch.linspace(-1, 1, w, device=ref_tok.device)
+        base_y, base_x = torch.meshgrid(gy, gx, indexing="ij")
+        base_grid = torch.stack([base_x, base_y], dim=-1).unsqueeze(0).expand(B, -1, -1, -1)
+
+        # Normalize patch-unit offsets to [-1, 1] space
+        norm_dx = offsets_hw[..., 0] * (2.0 / max(w - 1, 1))  # col shift
+        norm_dy = offsets_hw[..., 1] * (2.0 / max(h - 1, 1))  # row shift
+        delta = torch.stack([norm_dx, norm_dy], dim=-1)        # [B, h, w, 2]
+
+        grid = (base_grid + delta).clamp(-1.0, 1.0)
+
+        tgt_2d = tgt_tok.view(B, h, w, D).permute(0, 3, 1, 2)  # [B, D, h, w]
+        aligned = F.grid_sample(tgt_2d, grid, mode="bilinear",
+                                padding_mode="border", align_corners=True)
+        return aligned.permute(0, 2, 3, 1).view(B, N, D)
+
+
+# ---------------------------------------------------------------------------
+# CNN skip-connection branch  (TRAINABLE)
+# ---------------------------------------------------------------------------
+class CNNSkip(nn.Module):
+    """Lightweight Siamese CNN that produces real high-resolution change
+    features to replace the Bridge's bilinearly-upsampled tokens in SAM's
+    high_res_features slots.
+
+    Outputs:
+        feat_s0  [B, 32, 4*target_h, 4*target_h]  (finest — replaces Bridge feat_s0)
+        feat_s1  [B, 64, 2*target_h, 2*target_h]  (replaces Bridge feat_s1)
+
+    Change signal = |CNN(ref) - CNN(tgt)| at each scale.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Shared Siamese stem — outputs full-res features (32 channels)
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1, bias=False),
+            nn.GroupNorm(8, 32), nn.GELU(),
+            nn.Conv2d(32, 32, 3, padding=1, bias=False),
+            nn.GroupNorm(8, 32), nn.GELU(),
+        )
+        # Stride-2 branch — outputs half-res features (64 channels)
+        self.downsample = nn.Sequential(
+            nn.Conv2d(32, 64, 3, stride=2, padding=1, bias=False),
+            nn.GroupNorm(16, 64), nn.GELU(),
+            nn.Conv2d(64, 64, 3, padding=1, bias=False),
+            nn.GroupNorm(16, 64), nn.GELU(),
+        )
+
+    def forward(self, ref: Tensor, tgt: Tensor, target_h: int = 64) -> list:
+        ref_full = self.stem(ref)                   # [B, 32, H, W]
+        tgt_full = self.stem(tgt)
+        diff_full = (ref_full - tgt_full).abs()     # [B, 32, H, W]
+
+        ref_half = self.downsample(ref_full)        # [B, 64, H/2, W/2]
+        tgt_half = self.downsample(tgt_full)
+        diff_half = (ref_half - tgt_half).abs()     # [B, 64, H/2, W/2]
+
+        # Resize to match what SAM decoder expects
+        s0_h, s0_w = target_h * 4, target_h * 4
+        s1_h, s1_w = target_h * 2, target_h * 2
+        feat_s0 = F.interpolate(diff_full, (s0_h, s0_w), mode="bilinear", align_corners=False)
+        feat_s1 = F.interpolate(diff_half, (s1_h, s1_w), mode="bilinear", align_corners=False)
+        return [feat_s0, feat_s1]
+
+
+# ---------------------------------------------------------------------------
 # Building blocks for Bridge v2
 # ---------------------------------------------------------------------------
 class ResidualBlock(nn.Module):
@@ -531,6 +626,12 @@ class ChangeDetector(nn.Module):
         # Tier-1 latent-space ablations
         bidir_attn: bool = False,
         local_window: int = 1,
+        # Spatial alignment & high-res skip
+        learnable_offset: bool = False,
+        max_offset: float = 2.0,
+        cnn_skip: bool = False,
+        # Ablation: replace CrossChangeAttention with simple elementwise difference
+        simple_diff: bool = False,
         # LoRA
         lora_rank: int = 0,
         lora_target: str = "none",
@@ -620,6 +721,14 @@ class ChangeDetector(nn.Module):
             use_high_res=use_high_res,
         )
 
+        self.simple_diff = simple_diff
+
+        # ── Learnable alignment (TRAINABLE, optional) ────────────────
+        self.alignment = LearnableAlignment(self.dino_dim, max_offset) if learnable_offset else None
+
+        # ── CNN skip (TRAINABLE, optional) ───────────────────────────
+        self.cnn_skip_branch = CNNSkip() if (cnn_skip and use_high_res) else None
+
         self.encoder_name = encoder_id
         self.decoder_name = decoder
 
@@ -683,7 +792,15 @@ class ChangeDetector(nn.Module):
         pw = ref.shape[3] // self.patch_size
 
         ref_multi, tgt_multi, ref_tok, tgt_tok = self._dino_forward_pair(ref, tgt)
-        change_tokens, change_map = self.cross_attn(ref_tok, tgt_tok, grid_h=ph, grid_w=pw)
+
+        if self.alignment is not None:
+            tgt_tok = self.alignment(ref_tok, tgt_tok, ph, pw)
+
+        if self.simple_diff:
+            change_tokens = F.layer_norm(ref_tok - tgt_tok, [self.dino_dim])
+            change_map = 1.0 - F.cosine_similarity(ref_tok, tgt_tok, dim=-1)
+        else:
+            change_tokens, change_map = self.cross_attn(ref_tok, tgt_tok, grid_h=ph, grid_w=pw)
 
         bridge_input = [
             (r - t) + change_tokens for r, t in zip(ref_multi, tgt_multi)
@@ -693,6 +810,9 @@ class ChangeDetector(nn.Module):
         image_emb, dense_prompt, high_res_features, aux_change_maps = self.bridge(
             bridge_input, change_tokens, ph, pw, th, tw
         )
+
+        if self.cnn_skip_branch is not None:
+            high_res_features = self.cnn_skip_branch(ref, tgt, th)
 
         masks, iou_pred = self._decode(image_emb, dense_prompt, high_res_features, B)
         # Returns: pixel mask, predicted IoU, patch-level change_map (for legacy
@@ -758,8 +878,14 @@ class ChangeDetector(nn.Module):
                 yield name, p
 
     def param_groups(self, lr: float):
-        # Bridge + cross_attn at full LR (always main lr).
-        main = list(self.cross_attn.parameters()) + list(self.bridge.parameters())
+        # Bridge + cross_attn (skipped when simple_diff) + optional new modules at full LR.
+        main = list(self.bridge.parameters())
+        if not self.simple_diff:
+            main += list(self.cross_attn.parameters())
+        if self.alignment is not None:
+            main += list(self.alignment.parameters())
+        if self.cnn_skip_branch is not None:
+            main += list(self.cnn_skip_branch.parameters())
         groups = [{"params": main, "lr": lr}]
 
         # SAM decoder full FT at decoder_lr_scale × lr (legacy).
