@@ -240,9 +240,10 @@ class CrossChangeAttention(nn.Module):
         q = self.q_proj(q_in).view(B, S, H, d).transpose(1, 2)
         k = self.k_proj(k_in).view(B, S, H, d).transpose(1, 2)
         v = self.v_proj(v_in).view(B, S, H, d).transpose(1, 2)
-        temp = self.log_temp.exp().clamp(min=1.0)
+        temp = self.log_temp.exp().clamp(min=1.0, max=100.0)
         attn_logits = (q @ k.transpose(-2, -1)) * (temp / d ** 0.5)
-        attn_weights = attn_logits.softmax(dim=-1)
+        attn_logits = attn_logits.float().clamp(-100.0, 100.0)
+        attn_weights = attn_logits.softmax(dim=-1).to(q.dtype)
         attended = (attn_weights @ v).transpose(1, 2).reshape(B, S, D)
         attended = self.out_proj(attended)
         return attended, attn_weights
