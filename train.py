@@ -419,6 +419,9 @@ def main():
     p.add_argument("--decoder_lr_scale", type=float, default=0.1,
                    help="LR multiplier for decoder fine-tuning (default: 0.1)")
     p.add_argument("--list_models", action="store_true", help="List all available encoders/decoders and exit")
+    p.add_argument("--dino_pretrained", default=None,
+                   help="Path to a SSL-fine-tuned DINO checkpoint (from pretrain_ssl.py). "
+                        "After model construction, replaces model.dino with these weights.")
     # Backward compat (still work if provided)
     p.add_argument("--dino", default=None, help="(deprecated) Use --encoder instead")
     p.add_argument("--sam2_variant", default=None, help="(deprecated) Use --decoder instead")
@@ -629,6 +632,15 @@ def main():
         sam2_checkpoint=sam2_ckpt,
         sam2_config=sam2_cfg,
     ).to(device)
+
+    # Optional: load SSL-fine-tuned DINO weights
+    if args.dino_pretrained and os.path.isfile(args.dino_pretrained):
+        ssl_ckpt = torch.load(args.dino_pretrained, map_location=device, weights_only=False)
+        sd = ssl_ckpt.get("dino_state", ssl_ckpt)
+        missing, unexpected = model.dino.load_state_dict(sd, strict=False)
+        print(f"  Loaded SSL-pretrained DINO from {args.dino_pretrained}")
+        print(f"    epoch={ssl_ckpt.get('epoch','?')}  avg_loss={ssl_ckpt.get('avg_loss','?')}  "
+              f"missing={len(missing)}  unexpected={len(unexpected)}")
 
     n_train_p = sum(p.numel() for p in model.trainable_parameters())
     n_all_p = sum(p.numel() for p in model.parameters())
