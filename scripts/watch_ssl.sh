@@ -16,7 +16,10 @@ SOTA_DSIFN="0.9665"
 SOTA_SECOND="0.7246"
 
 NOW=$(date +%s)
-FRESH_SECS=600
+# log.csv is only appended at end of epoch (after train + val + test). At
+# 1024-px resolution one epoch can take 25-40 min, so the row gap exceeds
+# 10 min — bump to 45 min so live 1024-px runs don't get filtered out.
+FRESH_SECS=2700
 
 echo "════════════════════════════════════════════════════════════════════════════════════════"
 echo " QUEUE  ($(date +'%Y-%m-%d %H:%M:%S'))"
