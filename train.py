@@ -442,6 +442,8 @@ def main():
     p.add_argument("--no_amp", action="store_true")
     p.add_argument("--patience", type=int, default=10,
                    help="Early stopping patience: stop after N epochs without val F1 improvement")
+    p.add_argument("--no_early_stop", action="store_true",
+                   help="Disable early-stopping. Train for full --epochs regardless of val plateau.")
     # Loss
     p.add_argument("--latent_temp", type=float, default=0.03,
                    help="Temperature for latent change map loss (default: 0.03)")
@@ -728,12 +730,24 @@ def main():
                 latent_temperature=args.latent_temp,
                 latent_soft=args.latent_soft,
             )
-            if ema is not None:
-                ema.restore(model, ema_backup)
             print_metrics("val", val_m)
             for k, v in val_m.items():
                 row[f"val_{k}"] = round(v, 6)
             is_best = val_m["f1"] > best_f1
+            # Run TEST evaluation after every val pass, under EMA shadow
+            # weights (so test = val recipe). Adds ~10-30% per epoch but
+            # gives us the test trajectory for free.
+            if test_loader is not None:
+                test_m = evaluate(
+                    model, test_loader, device, scaler,
+                    latent_temperature=args.latent_temp,
+                    latent_soft=args.latent_soft,
+                )
+                print_metrics("test", test_m)
+                for k, v in test_m.items():
+                    row[f"test_{k}"] = round(v, 6)
+            if ema is not None:
+                ema.restore(model, ema_backup)
             if is_best:
                 best_f1 = val_m["f1"]
                 epochs_without_improvement = 0
@@ -784,8 +798,8 @@ def main():
         if ema is not None:
             ema.restore(model, ema_backup)
 
-        # --- early stopping ---
-        if epochs_without_improvement >= args.patience:
+        # --- early stopping (skipped when --no_early_stop is set) ---
+        if not args.no_early_stop and epochs_without_improvement >= args.patience:
             print(f"\n  Early stopping: no improvement for {args.patience} epochs (best F1={best_f1:.4f})")
             break
 
