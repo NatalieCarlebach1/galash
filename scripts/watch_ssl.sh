@@ -53,7 +53,7 @@ echo ""
 echo "════════════════════════════════════════════════════════════════════════════════════════"
 echo " DOWNSTREAM PROGRESS  (only runs with log.csv updated in last $((FRESH_SECS / 60)) min)"
 echo "════════════════════════════════════════════════════════════════════════════════════════"
-printf '%-7s %-12s %-5s %-10s %-9s %-14s %-7s %s\n' 'recipe' 'dataset' 'ep' 'best_val' 'b_ep/stale' 'test@bestEp' 'SOTA' 'gap'
+printf '%-7s %-12s %-5s %-10s %-9s %-14s %-7s %s\n' 'recipe' 'dataset' 'ep' 'best_val' 'b_ep/stale' 'test@bestVal' 'SOTA' 'gap'
 echo "----------------------------------------------------------------------------------------"
 
 declare -A DS_SOTA=(
@@ -116,18 +116,29 @@ if ivf<0: exit()
 fs=[(int(row[iep]),
      float(row[ivf]) if row[ivf] not in('','nan') else None,
      float(row[itf]) if itf>=0 and row[itf] not in('','nan') else None) for row in rows]
-val_only=[(e,v) for e,v,_ in fs if v is not None]
+val_only=[(e,v,t) for e,v,t in fs if v is not None]
 if not val_only: exit()
-last=fs[-1]; best=max(val_only, key=lambda x:x[1]); stale=last[0]-best[0]
-# Carry forward the last non-null test_f1 (which only fires on best-val
-# improvements in the per-best-val variant; runs with test-after-every-val
-# will have one per row).
-test_hist=[(e,t) for e,_,t in fs if t is not None]
-last_test_ep, last_test = test_hist[-1] if test_hist else (None, None)
-test_str=f'{last_test:.4f}@{last_test_ep}' if last_test is not None else '-'
+last=fs[-1]
+# Best.pt saves the checkpoint at the best val_f1 epoch. The test column
+# below is the test_f1 from THAT same epoch — the value the saved best.pt
+# would currently produce on the test set (no TTA yet).
+best_e, best_v, best_t = max(val_only, key=lambda x:x[1])
+stale=last[0]-best_e
+if best_t is None:
+    # test_f1 wasn't logged at best-val epoch — fall back to nearest non-null test
+    test_hist=[(e,t) for e,_,t in fs if t is not None]
+    if test_hist:
+        nearest = min(test_hist, key=lambda x: abs(x[0]-best_e))
+        test_str = f'{nearest[1]:.4f}@{nearest[0]}~'  # ~ marks fallback
+        gap_test = nearest[1]
+    else:
+        test_str, gap_test = '-', None
+else:
+    test_str = f'{best_t:.4f}@{best_e}'
+    gap_test = best_t
 sota = $sota if str('$sota') != '-' else None
-gap = f'{(last_test - sota)*100:+.2f}' if (last_test is not None and sota is not None) else '-'
-print(f'{\"$recipe\":<7s} {\"$ds\":<12s} {last[0]:<5d} {best[1]:<10.4f} {best[0]:<3d}/{stale:<5d} {test_str:<14s} {sota if sota is not None else \"-\":<7} {gap}')
+gap = f'{(gap_test - sota)*100:+.2f}' if (gap_test is not None and sota is not None) else '-'
+print(f'{\"$recipe\":<7s} {\"$ds\":<12s} {last[0]:<5d} {best_v:<10.4f} {best_e:<3d}/{stale:<5d} {test_str:<14s} {sota if sota is not None else \"-\":<7} {gap}')
 " 2>/dev/null
 done
 
