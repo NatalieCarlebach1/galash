@@ -71,6 +71,7 @@ for d in $(ls -td runs/ssl_ft/sslFT_*/ \
                   runs/ssl_ft/satFT_*/ \
                   runs/abl_*_cnn_skip_v3l_*/ \
                   runs/abl/abl_*_cnn_skip_v3l_*/ \
+                  runs/abl/abl_*_cnn_skip_rsbase_*/ \
                   runs/final_*/ \
                   2>/dev/null); do
     name=$(basename "$d")
@@ -93,8 +94,11 @@ for d in $(ls -td runs/ssl_ft/sslFT_*/ \
     #   final_<DS>_v3l_ssl_skip_TAG           -> recipe=v3l, ds=<DS>
     #   final_<DS>_sat_ssl_skip_TAG           -> recipe=v3sat, ds=<DS>
     if [[ "$name" =~ ^abl_(.+)_cnn_skip_v3l ]]; then
-        recipe="natFT"
+        recipe="v3l"
         ds=$(echo "$name" | sed -nE 's/^abl_([a-z0-9_]+)_cnn_skip_v3l.*/\1/p')
+    elif [[ "$name" =~ ^abl_(.+)_cnn_skip_rsbase ]]; then
+        recipe="rsbase"
+        ds=$(echo "$name" | sed -nE 's/^abl_([a-z0-9_]+)_cnn_skip_rsbase.*/\1/p')
     elif [[ "$name" =~ ^final_ ]]; then
         if [[ "$name" =~ _v3l_ ]]; then recipe="v3l"; else recipe="v3sat"; fi
         ds=$(echo "$name" | sed -nE 's/^final_([a-z0-9_]+)_(v3l|sat)_ssl_skip.*/\1/p')
