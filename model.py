@@ -620,8 +620,15 @@ class _Sam2ImageEncoderWrapper(nn.Module):
         toks = vf.flatten(2).transpose(1, 2)              # (B, S, D)
         cls = toks.mean(dim=1, keepdim=True)              # (B, 1, D) — fake CLS
         last_hidden = torch.cat([cls, toks], dim=1)       # (B, 1+S, D)
-        # Provide a tuple of hidden_states; only the last is read by ChangeDetector
-        return _Sam2EncoderOutput(hidden_states=(last_hidden,))
+        # ChangeDetector indexes hidden_states[i+1] for i in feature_layers
+        # (default = quarter-points of num_hidden_layers). SAM2's Hiera does
+        # not naturally expose those intermediate layers, so we just repeat
+        # the final feature N+1 times — multi-scale aux supervision then
+        # sees the same feature at all scales, which collapses to a single
+        # auxiliary loss term (acceptable; not the focus of this experiment).
+        N = self.config.num_hidden_layers
+        hidden_states = tuple(last_hidden for _ in range(N + 1))
+        return _Sam2EncoderOutput(hidden_states=hidden_states)
 
 
 def _load_sam2_image_encoder(info: dict):
