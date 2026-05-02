@@ -115,6 +115,8 @@ class ConfigurableAugmenter:
             return self._color_jitter(op, ref, tgt, mask)
         if name == "gaussian_blur":
             return self._blur(op, ref, tgt, mask)
+        if name == "random_erase":
+            return self._random_erase(op, ref, tgt, mask)
         if name == "one_of":
             chosen = random.choice(op["ops"])
             # if 'prob' was already applied above, pass through with prob=1.0
@@ -289,6 +291,51 @@ class ConfigurableAugmenter:
         r = random.uniform(lo, hi)
         ref = ref.filter(ImageFilter.GaussianBlur(radius=r))
         tgt = tgt.filter(ImageFilter.GaussianBlur(radius=r))
+        return ref, tgt, mask
+
+    @staticmethod
+    def _random_erase(op, ref, tgt, mask):
+        """torchvision-style RandomErasing on ref/tgt independently. Mask is
+        left intact — erase replaces image content with noise; the GT change
+        label for that region remains valid for either class."""
+        scale = op.get("scale", [0.02, 0.2])
+        ratio = op.get("ratio", [0.3, 3.3])
+        n = int(op.get("n", 1))
+        fill = op.get("fill", "random")
+        independent = bool(op.get("independent", True))
+
+        def erase_one(img):
+            arr = np.array(img).copy()
+            H, W = arr.shape[:2]
+            for _ in range(n):
+                area = H * W
+                for _try in range(10):
+                    target = random.uniform(*scale) * area
+                    r = random.uniform(*ratio)
+                    cw = int(round(np.sqrt(target * r)))
+                    ch = int(round(np.sqrt(target / r)))
+                    if cw < W and ch < H and cw > 0 and ch > 0:
+                        x = random.randint(0, W - cw)
+                        y = random.randint(0, H - ch)
+                        if fill == "random":
+                            if arr.ndim == 3:
+                                arr[y:y+ch, x:x+cw] = np.random.randint(
+                                    0, 256, (ch, cw, arr.shape[2]), dtype=arr.dtype)
+                            else:
+                                arr[y:y+ch, x:x+cw] = np.random.randint(
+                                    0, 256, (ch, cw), dtype=arr.dtype)
+                        elif fill == "mean":
+                            if arr.ndim == 3:
+                                arr[y:y+ch, x:x+cw] = arr.reshape(-1, arr.shape[2]).mean(0).astype(arr.dtype)
+                            else:
+                                arr[y:y+ch, x:x+cw] = int(arr.mean())
+                        else:
+                            arr[y:y+ch, x:x+cw] = int(fill)
+                        break
+            return Image.fromarray(arr)
+
+        ref = erase_one(ref)
+        tgt = erase_one(tgt) if independent else erase_one(tgt)
         return ref, tgt, mask
 
 
