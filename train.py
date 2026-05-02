@@ -32,46 +32,15 @@ import csv
 import json
 import math
 import os
-import random as _py_random
 import time
 from datetime import datetime
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.amp import GradScaler
 
 from model import ChangeDetector, ENCODERS, DECODERS, SAM2_VARIANTS, list_encoders, list_decoders
 from dataset import build_loaders
-
-
-# ---------------------------------------------------------------------------
-# Bitemporal CutMix (heavy-aug recipe, ported from Natalie_features_Sam)
-# Pastes a rectangle from a permuted partner pair into (ref, tgt, mask)
-# jointly so the change semantics stay consistent.
-# ---------------------------------------------------------------------------
-def cutmix_bitemporal(ref: torch.Tensor, tgt: torch.Tensor, mask: torch.Tensor,
-                      alpha: float = 1.0):
-    B, _, H, W = ref.shape
-    if B < 2:
-        return ref, tgt, mask
-    perm = torch.randperm(B, device=ref.device)
-    lam = float(np.random.beta(alpha, alpha))
-    cut_w = int(W * np.sqrt(max(0.0, 1.0 - lam)))
-    cut_h = int(H * np.sqrt(max(0.0, 1.0 - lam)))
-    if cut_w == 0 or cut_h == 0:
-        return ref, tgt, mask
-    cy = int(np.random.randint(H))
-    cx = int(np.random.randint(W))
-    y1, y2 = max(0, cy - cut_h // 2), min(H, cy + cut_h // 2)
-    x1, x2 = max(0, cx - cut_w // 2), min(W, cx + cut_w // 2)
-    if y2 <= y1 or x2 <= x1:
-        return ref, tgt, mask
-    ref = ref.clone(); tgt = tgt.clone(); mask = mask.clone()
-    ref[:, :, y1:y2, x1:x2] = ref[perm, :, y1:y2, x1:x2]
-    tgt[:, :, y1:y2, x1:x2] = tgt[perm, :, y1:y2, x1:x2]
-    mask[:, :, y1:y2, x1:x2] = mask[perm, :, y1:y2, x1:x2]
-    return ref, tgt, mask
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +177,6 @@ def compute_loss(
 def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=50,
                     latent_temperature=0.03, use_ohem=True, ohem_ratio=0.7,
                     latent_soft=False, w_aux_latent=0.0, latent_loss_type="bce",
-                    cutmix_alpha=0.0, cutmix_prob=0.0,
                     ema=None):
     model.train()
     running = {}
@@ -217,9 +185,6 @@ def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=5
 
     for step, (ref, tgt, mask) in enumerate(loader):
         ref, tgt, mask = ref.to(device), tgt.to(device), mask.to(device)
-        # Bitemporal CutMix at the batch level
-        if cutmix_alpha > 0 and cutmix_prob > 0 and _py_random.random() < cutmix_prob:
-            ref, tgt, mask = cutmix_bitemporal(ref, tgt, mask, alpha=cutmix_alpha)
         ph = ref.shape[2] // model.patch_size
         pw = ref.shape[3] // model.patch_size
 
@@ -479,13 +444,6 @@ def main():
                    help="Early stopping patience: stop after N epochs without val F1 improvement")
     p.add_argument("--no_early_stop", action="store_true",
                    help="Disable early-stopping. Train for full --epochs regardless of val plateau.")
-    # Bitemporal CutMix (heavy-aug recipe)
-    p.add_argument("--cutmix_alpha", type=float, default=0.0,
-                   help="Beta(alpha,alpha) parameter for bitemporal CutMix box. "
-                        "0 disables. Try 1.0.")
-    p.add_argument("--cutmix_prob", type=float, default=0.0,
-                   help="Probability per step of applying bitemporal CutMix. "
-                        "Usually 0.5 when cutmix_alpha > 0.")
     # Loss
     p.add_argument("--latent_temp", type=float, default=0.03,
                    help="Temperature for latent change map loss (default: 0.03)")
@@ -575,7 +533,6 @@ def main():
             ("batch", "batch"), ("epochs", "epochs"), ("patience", "patience"),
             ("lr", "lr"), ("warmup", "warmup"),
             ("decoder_lr_scale", "decoder_lr_scale"),
-            ("cutmix_alpha", "cutmix_alpha"), ("cutmix_prob", "cutmix_prob"),
         ]:
             if k_yaml in tr:
                 setattr(args, k_arg, tr[k_yaml])
@@ -682,43 +639,10 @@ def main():
     if args.dino_pretrained and os.path.isfile(args.dino_pretrained):
         ssl_ckpt = torch.load(args.dino_pretrained, map_location=device, weights_only=False)
         sd = ssl_ckpt.get("dino_state", ssl_ckpt)
-        # SSL ckpts saved by pretrain_ssl.py wrap each target Linear in a
-        # LoRALinear, so attention projections are stored as
-        #   attention.q_proj.base.weight + .lora_A + .lora_B
-        # instead of the plain  attention.q_proj.weight  the fresh model
-        # expects. We merge the LoRA delta into the base weight here so
-        # the downstream model can load with normal key names.
-        if any(k.endswith(".lora_A") for k in sd):
-            rank = ssl_ckpt.get("lora_rank", 8)
-            alpha = (ssl_ckpt.get("args") or {}).get("lora_alpha", 16.0)
-            scaling = alpha / max(rank, 1)
-            merged = {}
-            lora_prefixes = sorted({k[:-len(".lora_A")] for k in sd if k.endswith(".lora_A")})
-            for k, v in sd.items():
-                if k.endswith(".base.weight"):
-                    merged[k[:-len(".base.weight")] + ".weight"] = v
-                elif k.endswith(".base.bias"):
-                    merged[k[:-len(".base.bias")] + ".bias"] = v
-                elif k.endswith(".lora_A") or k.endswith(".lora_B"):
-                    pass  # handled below
-                else:
-                    merged[k] = v
-            for prefix in lora_prefixes:
-                A = sd[prefix + ".lora_A"]            # [r, in]
-                B = sd[prefix + ".lora_B"]            # [out, r]
-                wkey = prefix + ".weight"
-                if wkey in merged:
-                    merged[wkey] = merged[wkey] + scaling * (B @ A)
-            sd = merged
-            print(f"  Merged {len(lora_prefixes)} LoRA adapters into base weights "
-                  f"(rank={rank}, alpha={alpha}, scaling={scaling:.4f})")
         missing, unexpected = model.dino.load_state_dict(sd, strict=False)
         print(f"  Loaded SSL-pretrained DINO from {args.dino_pretrained}")
         print(f"    epoch={ssl_ckpt.get('epoch','?')}  avg_loss={ssl_ckpt.get('avg_loss','?')}  "
               f"missing={len(missing)}  unexpected={len(unexpected)}")
-        if missing or unexpected:
-            print(f"    (first missing: {missing[:3]})")
-            print(f"    (first unexpected: {unexpected[:3]})")
 
     n_train_p = sum(p.numel() for p in model.trainable_parameters())
     n_all_p = sum(p.numel() for p in model.parameters())
@@ -764,8 +688,6 @@ def main():
     print(f"Training for {args.epochs} epochs …")
     print(f"  latent_temp={args.latent_temp}  w_latent={args.w_latent}  "
           f"OHEM={'ON' if not args.no_ohem else 'OFF'}")
-    if args.cutmix_alpha > 0 and args.cutmix_prob > 0:
-        print(f"  CutMix: alpha={args.cutmix_alpha} prob={args.cutmix_prob}")
     print(f"  early stopping: patience={args.patience}")
     if args.tta:
         print(f"  TTA: enabled for final test evaluation")
@@ -789,8 +711,6 @@ def main():
             latent_soft=args.latent_soft,
             w_aux_latent=args.w_aux_latent,
             latent_loss_type=args.latent_loss,
-            cutmix_alpha=args.cutmix_alpha,
-            cutmix_prob=args.cutmix_prob,
             ema=ema,
         )
         scheduler.step()
