@@ -639,10 +639,43 @@ def main():
     if args.dino_pretrained and os.path.isfile(args.dino_pretrained):
         ssl_ckpt = torch.load(args.dino_pretrained, map_location=device, weights_only=False)
         sd = ssl_ckpt.get("dino_state", ssl_ckpt)
+        # SSL ckpts saved by pretrain_ssl.py wrap each target Linear in a
+        # LoRALinear, so attention projections are stored as
+        #   attention.q_proj.base.weight + .lora_A + .lora_B
+        # instead of the plain  attention.q_proj.weight  the fresh model
+        # expects. We merge the LoRA delta into the base weight here so
+        # the downstream model can load with normal key names.
+        if any(k.endswith(".lora_A") for k in sd):
+            rank = ssl_ckpt.get("lora_rank", 8)
+            alpha = (ssl_ckpt.get("args") or {}).get("lora_alpha", 16.0)
+            scaling = alpha / max(rank, 1)
+            merged = {}
+            lora_prefixes = sorted({k[:-len(".lora_A")] for k in sd if k.endswith(".lora_A")})
+            for k, v in sd.items():
+                if k.endswith(".base.weight"):
+                    merged[k[:-len(".base.weight")] + ".weight"] = v
+                elif k.endswith(".base.bias"):
+                    merged[k[:-len(".base.bias")] + ".bias"] = v
+                elif k.endswith(".lora_A") or k.endswith(".lora_B"):
+                    pass  # handled below
+                else:
+                    merged[k] = v
+            for prefix in lora_prefixes:
+                A = sd[prefix + ".lora_A"]            # [r, in]
+                B = sd[prefix + ".lora_B"]            # [out, r]
+                wkey = prefix + ".weight"
+                if wkey in merged:
+                    merged[wkey] = merged[wkey] + scaling * (B @ A)
+            sd = merged
+            print(f"  Merged {len(lora_prefixes)} LoRA adapters into base weights "
+                  f"(rank={rank}, alpha={alpha}, scaling={scaling:.4f})")
         missing, unexpected = model.dino.load_state_dict(sd, strict=False)
         print(f"  Loaded SSL-pretrained DINO from {args.dino_pretrained}")
         print(f"    epoch={ssl_ckpt.get('epoch','?')}  avg_loss={ssl_ckpt.get('avg_loss','?')}  "
               f"missing={len(missing)}  unexpected={len(unexpected)}")
+        if missing or unexpected:
+            print(f"    (first missing: {missing[:3]})")
+            print(f"    (first unexpected: {unexpected[:3]})")
 
     n_train_p = sum(p.numel() for p in model.trainable_parameters())
     n_all_p = sum(p.numel() for p in model.parameters())
