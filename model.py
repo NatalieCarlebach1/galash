@@ -130,6 +130,16 @@ ENCODERS = {
     "dinov3_huge":        {"hf": "facebook/dinov3-vith16plus-pretrain-lvd1689m",  "dim": 1280, "layers": 32, "patch": 16},
     # --- DINOv3 satellite (patch_size=16, gated) ---
     "dinov3_sat_large":   {"hf": "facebook/dinov3-vitl16-pretrain-sat493m",       "dim": 1024, "layers": 24, "patch": 16},
+    # --- SAM2 image encoder (Hiera). Output: vision_features at H/16, dim=256. ---
+    # Wrapped to expose a DINO/HF-like .config + .hidden_states interface.
+    "sam2_enc_tiny":      {"hf": "<sam2_enc>", "loader": "sam2_enc", "dim": 256, "layers": 12, "patch": 16,
+                           "sam2_cfg": "configs/sam2.1/sam2.1_hiera_t.yaml",  "sam2_ckpt": "sam2.1_hiera_tiny.pt"},
+    "sam2_enc_small":     {"hf": "<sam2_enc>", "loader": "sam2_enc", "dim": 256, "layers": 12, "patch": 16,
+                           "sam2_cfg": "configs/sam2.1/sam2.1_hiera_s.yaml",  "sam2_ckpt": "sam2.1_hiera_small.pt"},
+    "sam2_enc_base_plus": {"hf": "<sam2_enc>", "loader": "sam2_enc", "dim": 256, "layers": 12, "patch": 16,
+                           "sam2_cfg": "configs/sam2.1/sam2.1_hiera_b+.yaml", "sam2_ckpt": "sam2.1_hiera_base_plus.pt"},
+    "sam2_enc_large":     {"hf": "<sam2_enc>", "loader": "sam2_enc", "dim": 256, "layers": 24, "patch": 16,
+                           "sam2_cfg": "configs/sam2.1/sam2.1_hiera_l.yaml",  "sam2_ckpt": "sam2.1_hiera_large.pt"},
 }
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -559,8 +569,75 @@ def _load_encoder(name_or_hf: str):
         from load_dino_rs import load_dinov2_remote_sensing
         return load_dinov2_remote_sensing(hf_id)
 
+    if loader == "sam2_enc":
+        # SAM2 image encoder wrapped to expose the HF-style interface
+        # (config + pixel_values + hidden_states).
+        return _load_sam2_image_encoder(info)
+
     from transformers import AutoModel
     return AutoModel.from_pretrained(hf_id, output_hidden_states=True, trust_remote_code=True)
+
+
+# ─────────────────────────────────────────────────────────────────
+# SAM2 image encoder wrapper — exposes a DINO/HF-compatible API so
+# ChangeDetector can swap it in for a DINO encoder.
+# Output: vision_features (B, 256, H/16, W/16) -> reshape to (B, S, 256)
+#         and prepend a fake CLS so .hidden_states[-1] looks like ViT.
+# ─────────────────────────────────────────────────────────────────
+class _Sam2EncoderConfig:
+    def __init__(self, hidden_size, num_hidden_layers, patch_size, num_register_tokens=0):
+        self.hidden_size = hidden_size
+        self.num_hidden_layers = num_hidden_layers
+        self.patch_size = patch_size
+        self.num_register_tokens = num_register_tokens
+
+
+class _Sam2EncoderOutput:
+    def __init__(self, hidden_states):
+        self.hidden_states = hidden_states
+
+
+class _Sam2ImageEncoderWrapper(nn.Module):
+    """Wraps SAM2's image_encoder so it looks like a DINO HF model.
+    Forward(pixel_values) -> .hidden_states[-1] = (B, 1+S, 256)
+    where the leading token is a fake CLS (mean-pooled features).
+    """
+    def __init__(self, image_encoder, hidden_size, patch_size, num_hidden_layers):
+        super().__init__()
+        self.image_encoder = image_encoder
+        self.config = _Sam2EncoderConfig(
+            hidden_size=hidden_size,
+            num_hidden_layers=num_hidden_layers,
+            patch_size=patch_size,
+        )
+
+    def forward(self, pixel_values=None, **kwargs):
+        x = pixel_values
+        out = self.image_encoder(x)
+        # vision_features: (B, 256, H/16, W/16) — flatten to tokens
+        vf = out["vision_features"]
+        B, D, Hp, Wp = vf.shape
+        toks = vf.flatten(2).transpose(1, 2)              # (B, S, D)
+        cls = toks.mean(dim=1, keepdim=True)              # (B, 1, D) — fake CLS
+        last_hidden = torch.cat([cls, toks], dim=1)       # (B, 1+S, D)
+        # Provide a tuple of hidden_states; only the last is read by ChangeDetector
+        return _Sam2EncoderOutput(hidden_states=(last_hidden,))
+
+
+def _load_sam2_image_encoder(info: dict):
+    """Build a SAM2 image_encoder + wrapper."""
+    from sam2.build_sam import build_sam2
+    cfg = info["sam2_cfg"]
+    ckpt = info["sam2_ckpt"]
+    ckpt_path = ckpt if os.path.isabs(ckpt) else os.path.join("checkpoints", ckpt)
+    sam2 = build_sam2(cfg, ckpt_path)
+    enc = sam2.image_encoder
+    return _Sam2ImageEncoderWrapper(
+        image_encoder=enc,
+        hidden_size=info["dim"],
+        patch_size=info["patch"],
+        num_hidden_layers=info["layers"],
+    )
 
 
 def _load_decoder_sam1(checkpoint: str, model_type: str, ckpt_dir: str):
