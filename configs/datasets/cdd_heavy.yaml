@@ -1,0 +1,50 @@
+# CDD / Season-Varying heavy augmentation / training config (2026-04-28).
+# CDD is season-varying (lighting, vegetation, snow) — the photometric channel
+# is more important here than for LEVIR. Heavy color jitter + photometric
+# distortion + cutmix matches what SChanger / RFL-CDNet implicitly do.
+#
+# Reference (BIT/ChangeFormer minimal + SChanger heavy adds):
+#   ChangeFormer: hflip+vflip+scale_crop+blur+color_jitter (independent)
+#   We add: rotate, temporal_swap, photometric_distortion, random_erase, cutmix.
+
+dataset: cdd
+img_size: 256
+test_img_size: 256
+
+normalization:
+  mean: [0.5, 0.5, 0.5]
+  std:  [0.5, 0.5, 0.5]
+
+augmentations:
+  - {op: random_flip,    direction: horizontal, prob: 0.5}
+  - {op: random_flip,    direction: vertical,   prob: 0.5}
+  - {op: random_rotate,  degrees: 20, prob: 0.5}
+  - {op: scale_random_crop, size: 256, scale_range: [0.8, 1.5]}
+  - {op: temporal_swap,  prob: 0.5}
+  - {op: photometric_distortion, brightness_delta: 15,
+     contrast_range: [0.7, 1.3], saturation_range: [0.7, 1.3], hue_delta: 15,
+     prob: 0.5}
+  - {op: color_jitter,   brightness: 0.3, contrast: 0.3, saturation: 0.3, hue: 0.1,
+     independent: true, prob: 0.5}
+  - {op: gaussian_blur,  radius_range: [0.0, 1.0], independent: true, prob: 0.3}
+  - {op: random_erase,   scale: [0.02, 0.15], ratio: [0.3, 3.3], n: 1,
+     fill: random, independent: true, prob: 0.25}
+
+training:
+  batch: 16
+  epochs: 300
+  patience: 15
+  lr: 6.0e-5
+  warmup: 3
+  decoder_lr_scale: 0.1
+  finetune_decoder: false
+  tta: true
+  cutmix_alpha: 1.0
+  cutmix_prob: 0.5
+
+reference_methods:
+  - {name: SChanger,     year: 2025, f1: 0.9762, iou: null}
+  - {name: ChangeStar2,  year: 2024, f1: 0.9750}
+  - {name: RFL-CDNet,    year: 2024, f1: 0.9612}
+  - {name: DDPM-CD,      year: 2024, f1: 0.9562, iou: 0.9162, primary_metric: iou}
+  - {name: ChangeFormer, year: 2022, f1: 0.9463, iou: 0.8980}
