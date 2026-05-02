@@ -93,12 +93,19 @@ for d in $(ls -td runs/ssl_ft/sslFT_*/ \
     #   abl_<DS>_cnn_skip_v3l[_ssl]_TAG       -> recipe=natFT, ds=<DS>
     #   final_<DS>_v3l_ssl_skip_TAG           -> recipe=v3l, ds=<DS>
     #   final_<DS>_sat_ssl_skip_TAG           -> recipe=v3sat, ds=<DS>
-    if [[ "$name" =~ ^abl_(.+)_cnn_skip_v3l ]]; then
+    # New runs add _ssl / _1024 / _main suffixes after the recipe tag.
+    if [[ "$name" =~ ^abl_(.+)_cnn_skip_v3l_ssl ]]; then
+        recipe="v3l+ssl"
+        ds=$(echo "$name" | sed -nE 's/^abl_([a-z0-9_]+)_cnn_skip_v3l_ssl.*/\1/p')
+    elif [[ "$name" =~ ^abl_(.+)_cnn_skip_v3l ]]; then
         recipe="v3l"
         ds=$(echo "$name" | sed -nE 's/^abl_([a-z0-9_]+)_cnn_skip_v3l.*/\1/p')
-    elif [[ "$name" =~ ^abl_(.+)_cnn_skip_rsbase ]]; then
+    elif [[ "$name" =~ ^abl_(.+)_cnn_skip_(rsbase|rs_base)_ssl ]]; then
+        recipe="rsb+ssl"
+        ds=$(echo "$name" | sed -nE 's/^abl_([a-z0-9_]+)_cnn_skip_(rsbase|rs_base)_ssl.*/\1/p')
+    elif [[ "$name" =~ ^abl_(.+)_cnn_skip_(rsbase|rs_base) ]]; then
         recipe="rsbase"
-        ds=$(echo "$name" | sed -nE 's/^abl_([a-z0-9_]+)_cnn_skip_rsbase.*/\1/p')
+        ds=$(echo "$name" | sed -nE 's/^abl_([a-z0-9_]+)_cnn_skip_(rsbase|rs_base).*/\1/p')
     elif [[ "$name" =~ ^final_ ]]; then
         if [[ "$name" =~ _v3l_ ]]; then recipe="v3l"; else recipe="v3sat"; fi
         ds=$(echo "$name" | sed -nE 's/^final_([a-z0-9_]+)_(v3l|sat)_ssl_skip.*/\1/p')

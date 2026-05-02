@@ -1,0 +1,38 @@
+# LEVIR-CD+ at NATIVE 1024×1024 (no downscale).
+# Same recipe as levir_cd_plus.yaml but trained on full-resolution tiles.
+# Memory cost: dinov3_large attention is 16× heavier (64² tokens vs 32²),
+# so batch must drop from 16 to 4. Each epoch ~3-4× slower.
+
+dataset: levir_cd_plus
+img_size: 1024
+test_img_size: 1024
+
+normalization:
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+augmentations:
+  - {op: one_of,
+     ops: [
+       {op: random_flip,   direction: horizontal, prob: 1.0},
+       {op: random_flip,   direction: vertical,   prob: 1.0},
+       {op: random_rotate, degrees: 90, prob: 1.0, discrete: true},
+     ],
+     prob: 0.5}
+  - {op: random_scale, scales: [0.75, 1.25, 1.5], prob: 0.5}
+  - {op: random_crop,  size: 1024}
+
+training:
+  batch: 2
+  epochs: 300
+  patience: 15
+  lr: 6.0e-5
+  warmup: 3
+  decoder_lr_scale: 0.1
+  finetune_decoder: false
+  tta: true
+
+reference_methods:
+  - {name: "ChangeStar + Changen", year: 2023, f1: 0.9150, url: "https://arxiv.org/abs/2309.17351"}
+  - {name: ChangeStar,             year: 2021, f1: 0.9050}
+  - {name: DDCDNet,                year: 2024, f1: 0.8771}
