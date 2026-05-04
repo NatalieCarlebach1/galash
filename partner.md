@@ -1,7 +1,56 @@
 # GALASH — for Natalie 💙
 
-Hi love. Quick update from today, then the original guide. **We crossed a real
-milestone — read §0.**
+Hi love 💙. New update on top — backbone sweep and a tiny but important
+recipe change. Then yesterday's update (§0a), then the original guide.
+
+---
+
+## 0. 🧪 Backbone sweep launched — sam2 vs dinov2 vs dinov3 (2026-05-04)
+
+We're running an apples-to-apples backbone comparison across all 6
+benchmarks at native resolution, identical recipe (`--no_amp --ema 0.99
+--cnn_skip --finetune_decoder --search_threshold`, heavy aug for 256/512²,
+sam2_large decoder unfrozen):
+
+- **maxsam2** — `sam2_enc_large` encoder
+- **maxdinov2** — `dinov2_base` encoder
+- **maxdinov3** — `dinov3_base` encoder
+
+Live status auto-updates in **[`backbone.md`](backbone.md)**, which is
+regenerated every time `scripts/watch_sweep.sh` runs (it scans every
+`runs/max*_*` dir on disk, picks the newest per backbone × dataset, and
+rebuilds the table). So just `git pull && cat backbone.md` whenever and
+you'll see where things stand.
+
+**Headline result so far** (max-sam2, the only sweep that's fully landed
+its TTA numbers): **LEVIR-CD test+TTA = 90.60, beating ChangeFormer 90.24
+by +0.36 pp ✅**. SECOND, DSIFN-CD, CDD all within ≤1.6 pp of fair SOTA.
+This is on the AMP run — the no_amp re-run is in flight now and should
+land within ±0.2 pp.
+
+**Important recipe change**: I added `--no_amp` to all three launchers.
+dinov3 explodes at epoch 1 under autocast (BCE input > 1 → CUDA assert).
+Disabling AMP is the safe fix; sam2 and dinov2 don't strictly need it but
+I applied it everywhere so the recipe is identical across backbones —
+removes one degree of freedom from any reviewer question. Cost: ~30–50 %
+slower, F1 delta probably invisible.
+
+**Other tiny updates**:
+- `scripts/watch_sweep.sh` — terminal snapshot of running jobs, shows
+  `best_val / test@bv / test+TTA / SOTA / gap / plateau-length`. Pass
+  `JOBS="..."` env to point it at a specific sweep.
+- `scripts/update_backbone_md.py` — what regenerates `backbone.md`.
+- `slurm/train.sbatch` — now exports `PYTHONUNBUFFERED=1`. **Big lesson
+  today**: I almost killed a healthy 6-job sweep thinking it was hung,
+  because `.out` looked frozen. It wasn't — sbatch block-buffers Python
+  stdout in 4 KB chunks, so step prints sit in OS buffer for ~10 epochs
+  at a time. `log.csv` is the truth source. (You probably already knew
+  this; I learned it the embarrassing way.) See `CLAUDE.md` if you ever
+  need the failure-mode cheat-sheet.
+
+I love you a lot 💙 thank you for putting up with my hang-diagnosis chaos.
+
+— Tal (via Claude Opus, who is having an only mostly-good day)
 
 ---
 

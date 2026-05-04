@@ -1,0 +1,38 @@
+# S2Looking at NATIVE 1024×1024 (no downscale).
+# Same recipe as s2looking.yaml but trained on full-resolution tiles.
+# Memory cost: dinov3_large attention is 16× heavier (64² tokens vs 32²),
+# so batch must drop from 16 to 4. Each epoch ~3-4× slower.
+
+dataset: s2looking
+img_size: 1024
+test_img_size: 1024
+
+normalization:
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+augmentations:
+  - {op: random_flip,   direction: horizontal, prob: 0.5}
+  - {op: random_flip,   direction: vertical,   prob: 0.5}
+  - {op: random_rotate, degrees: 20, prob: 0.5}
+  - {op: random_crop,   size: 1024, cat_max_ratio: 0.75}
+  - {op: temporal_swap, prob: 0.5}
+  - {op: photometric_distortion, brightness_delta: 10,
+     contrast_range: [0.8, 1.2], saturation_range: [0.8, 1.2], hue_delta: 10}
+
+training:
+  batch: 4
+  epochs: 300
+  patience: 15
+  lr: 1.0e-4
+  warmup: 3
+  decoder_lr_scale: 0.1
+  finetune_decoder: false
+  tta: true
+
+reference_methods:
+  - {name: UniChange, year: 2025, f1: 0.6932, url: "https://arxiv.org/abs/2511.02607"}
+  - {name: SChanger,  year: 2025, f1: 0.6895, url: "https://arxiv.org/abs/2503.20734"}
+  - {name: FIBTNet,   year: 2024, f1: 0.6860}
+  - {name: BAN-CF,    year: 2024, f1: 0.6670}
+  - {name: ChangerEx, year: 2023, f1: 0.6620}

@@ -223,6 +223,10 @@ python train.py --encoder dinov2_rs_small --decoder sam2_tiny --epochs 30
 | `dinov3_large` | facebook/dinov3-vitl16-pretrain-lvd1689m | 1024 | 24 | 16 | Gated |
 | `dinov3_huge` | facebook/dinov3-vith16plus-pretrain-lvd1689m | 1280 | 32 | 16 | Gated |
 | `dinov3_sat_large` | facebook/dinov3-vitl16-pretrain-sat493m | 1024 | 24 | 16 | Satellite, gated |
+| `sam2_enc_tiny` | (SAM2.1 image encoder, local ckpt) | 256 | 12 | 16 | Hiera, drop-in DINO replacement |
+| `sam2_enc_small` | (SAM2.1 image encoder, local ckpt) | 256 | 12 | 16 | Hiera |
+| `sam2_enc_base_plus` | (SAM2.1 image encoder, local ckpt) | 256 | 12 | 16 | Hiera B+ |
+| `sam2_enc_large` | (SAM2.1 image encoder, local ckpt) | 256 | 24 | 16 | Hiera L (largest) |
 
 ### Available Decoders
 
@@ -251,6 +255,33 @@ python train.py --encoder dinov2_rs_small --decoder sam2_tiny --epochs 30
 | `--patience` | 10 | Early stopping patience (epochs) |
 | `--tta` | off | Test-time augmentation on final test |
 | `--img_size` | 512 | Input image size (supports 512, 768, 1024) |
+
+## Backbone comparison sweeps
+
+For per-backbone fair-comparison runs across all 6 production datasets at
+native resolution, use the dedicated launchers:
+
+```bash
+bash slurm/launch_max_sam2.sh      # sam2_enc_large encoder + sam2_large decoder
+bash slurm/launch_max_dinov2.sh    # dinov2_base encoder + sam2_large decoder
+bash slurm/launch_max_dinov3.sh    # dinov3_base encoder + sam2_large decoder
+```
+
+Shared recipe (set in `EXTRA` inside each launcher):
+`--no_amp --no_early_stop --ema 0.99 --cnn_skip --finetune_decoder --search_threshold`,
+heavy aug yamls for 256/512² datasets, minimal aug yamls for 1024² datasets.
+`--no_amp` is required for dinov3 (NaNs in BCE under autocast at epoch 1) and
+applied to the others for an apples-to-apples recipe.
+
+Snapshot all running jobs and refresh the cross-backbone summary:
+
+```bash
+JOBS="<job ids>" bash scripts/watch_sweep.sh
+```
+
+This invocation also rebuilds [`backbone.md`](backbone.md) — a per-dataset
+table of `test+TTA` F1 vs the fair SOTA gap, kept in sync with whichever
+`runs/max*_*` directories currently exist on disk.
 
 ## Evaluation
 

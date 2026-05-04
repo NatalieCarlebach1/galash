@@ -13,6 +13,11 @@ cd /home/nfs/tals/galash
 source /home/nfs/tals/miniconda3/etc/profile.d/conda.sh
 conda activate ns-sam3
 
+# Force unbuffered stdout so progress shows in .out as it happens.
+# Without this, sbatch's file redirect makes Python block-buffer (4 KB chunks)
+# and runs look frozen for many epochs at a time.
+export PYTHONUNBUFFERED=1
+
 # Configuration via env vars (with defaults):
 #   ENCODER   default dinov2_rs_base
 #   DECODER   default sam2_base_plus
