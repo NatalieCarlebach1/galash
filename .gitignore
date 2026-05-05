@@ -51,3 +51,5 @@ paper/*.synctex.gz
 paper/*.pdf
 paper/sections/*.aux
 pretrain_runs/
+
+gift_for_natalie/

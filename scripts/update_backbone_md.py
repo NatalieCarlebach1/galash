@@ -30,7 +30,31 @@ SOTA = {
 
 DATASETS = list(SOTA.keys())
 
+# Friendlier column labels for the summary table (tag -> display name).
+# Anything not listed here is rendered as `max-<tag>` verbatim.
+TAG_DISPLAY = {
+    "dinov2":        "dinov2-base",
+    "dinov2rs":      "dinov2rs-base",
+    "dinov2rslarge": "dinov2rs-large",
+    "dinov3":        "dinov3-base",
+    "sam2":          "sam2-large",
+}
+
+# Display order for backbone columns (semantic, not alphabetical). Tags not
+# listed get appended in alpha order so new sweeps still appear.
+TAG_ORDER = ["dinov2", "dinov2rs", "dinov2rslarge", "dinov3", "sam2"]
+
 RUN_RE = re.compile(r"^max(?P<tag>[a-zA-Z0-9]+)_(?P<ds>.+)_(?P<ts>\d{8}_\d{4})$")
+
+
+def display_name(tag: str) -> str:
+    return TAG_DISPLAY.get(tag, tag)
+
+
+def order_tags(tags: list[str]) -> list[str]:
+    known = [t for t in TAG_ORDER if t in tags]
+    extra = sorted(t for t in tags if t not in TAG_ORDER)
+    return known + extra
 
 
 def parse_run_dir(d: Path):
@@ -104,7 +128,7 @@ def build():
         OUT.write_text("# Backbone Comparison\n\nNo runs found.\n")
         return
 
-    tags_sorted = sorted(by_tag.keys())
+    tags_sorted = order_tags(list(by_tag.keys()))
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
     lines = []
@@ -117,7 +141,7 @@ def build():
 
     # ---- Summary table: dataset rows × backbone-tag columns (test+TTA F1) ----
     lines.append("## Summary (test+TTA F1 per backbone)\n")
-    header = ["Dataset", "Fair SOTA"] + [f"max-{t}" for t in tags_sorted] + ["Best (gap)"]
+    header = ["Dataset", "Fair SOTA"] + [display_name(t) for t in tags_sorted] + ["Best (gap)"]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|" + "|".join(["---"] * len(header)) + "|")
     for ds in DATASETS:

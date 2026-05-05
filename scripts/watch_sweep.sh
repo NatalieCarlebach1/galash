@@ -3,10 +3,19 @@
 # val_f1, and the gap to the published SOTA for each dataset.
 #
 # Usage:
-#   bash scripts/watch_sweep.sh                     # default jobs 54479-54484
+#   bash scripts/watch_sweep.sh                     # auto: all running g-* jobs
 #   JOBS="54479 54480 ..." bash scripts/watch_sweep.sh
 #
-JOBS="${JOBS:-54479 54480 54481 54482 54483 54484}"
+# Default: pull every currently-queued/running galash job (job names beginning
+# with "g-") from squeue. Override with JOBS=... if you want a specific subset.
+if [ -z "${JOBS:-}" ]; then
+    JOBS=$(squeue -h -u "$USER" -o '%i %j' 2>/dev/null \
+           | awk '$2 ~ /^g-/{print $1}' | tr '\n' ' ')
+fi
+if [ -z "${JOBS// }" ]; then
+    echo "No running galash jobs (squeue empty for g-* names)."
+    exit 0
+fi
 
 # Side effect: rebuild backbone.md from all max*_* runs.
 python3 "$(dirname "$0")/update_backbone_md.py" >/dev/null 2>&1 || true
@@ -28,30 +37,44 @@ declare -A SOTA_NAME=(
     [levir_cd_plus]=DDCDNet [s2looking]=FIBTNet [second]=SAM-SCD
 )
 
-printf "%-15s  %-7s  %-7s  %-8s  %-8s  %-8s  %-7s  %-8s  %s\n" \
-       "dataset" "ep_now" "ep_bv" "best_val" "test@bv" "test+TTA" "SOTA" "gap" "(state, plateau)"
-printf "%-15s  %-7s  %-7s  %-8s  %-8s  %-8s  %-7s  %-8s  %s\n" \
-       "---------------" "-------" "-------" "--------" "--------" "--------" "-------" "--------" "----------------"
+printf "%-15s  %-10s  %-7s  %-7s  %-8s  %-8s  %-8s  %-7s  %-8s  %s\n" \
+       "dataset" "backbone" "ep_now" "ep_bv" "best_val" "test@bv" "test+TTA" "SOTA" "gap" "(state, plateau)"
+printf "%-15s  %-10s  %-7s  %-7s  %-8s  %-8s  %-8s  %-7s  %-8s  %s\n" \
+       "---------------" "----------" "-------" "-------" "--------" "--------" "--------" "-------" "--------" "----------------"
 
 for j in $JOBS; do
     f=$(ls logs/slurm/train_${j}_*.out 2>/dev/null | head -1)
     [ -z "$f" ] && { printf "%-15s  (no log)\n" "job=$j"; continue; }
 
-    name=$(basename "$f" .out | sed -E 's/train_[0-9]+_g-//; s/-(sam2|max|dinov2|dinov3|nostop|nostop-ema)$//')
+    raw=$(basename "$f" .out | sed -E 's/train_[0-9]+_g-//')
+    # Split job-name into <dataset>-<backbone>. Backbone is the trailing token
+    # after the LAST `-` and tells us which sweep prefix to look under.
+    backbone=$(echo "$raw" | sed -E 's/.*-([^-]+)$/\1/')
+    name=$(echo "$raw" | sed -E 's/-[^-]+$//')
+    case "$backbone" in
+        rslarge)        prefixes="maxdinov2rslarge" ;;
+        dinov2rs)       prefixes="maxdinov2rs" ;;
+        dinov3sat)      prefixes="maxdinov3sat" ;;
+        dinov3)         prefixes="maxdinov3" ;;
+        dinov2)         prefixes="maxdinov2" ;;
+        sam2|max)       prefixes="maxsam2 dgxsam2" ;;
+        *)              # Unknown suffix — treat the whole thing as dataset and
+                        # fall back to scanning all known prefixes (legacy).
+                        name="$raw"
+                        prefixes="maxdinov2rslarge maxdinov2rs maxdinov3sat maxdinov3 maxdinov2 maxsam2 dgxsam2" ;;
+    esac
+
     state=$(squeue -j $j -h -o '%t' 2>/dev/null || echo "?")
     [ -z "$state" ] && state="DONE"
 
-    # Find the run dir's log.csv (newest). Tries the maxsam2_*/dgxsam2_* prefixes
-    # used by the launchers. Anchor on _2026 so dgxsam2_levir_cd_* doesn't
-    # accidentally match dgxsam2_levir_cd_plus_*.
-    runcsv=$(ls -td \
-        runs/maxdinov3_${name}_2026*/2*/log.csv \
-        runs/maxdinov2_${name}_2026*/2*/log.csv \
-        runs/maxsam2_${name}_2026*/2*/log.csv \
-        runs/dgxsam2_${name}_2026*/2*/log.csv \
-        2>/dev/null | head -1)
+    # Find the run dir's log.csv (newest) under the matching backbone prefix.
+    globs=""
+    for p in $prefixes; do
+        globs="$globs runs/${p}_${name}_2026*/2*/log.csv"
+    done
+    runcsv=$(ls -td $globs 2>/dev/null | head -1)
     if [ -z "$runcsv" ] || [ ! -f "$runcsv" ]; then
-        printf "%-15s  no log.csv (%s)\n" "$name" "$state"
+        printf "%-15s  %-10s  no log.csv (%s)\n" "$name" "$backbone" "$state"
         continue
     fi
 
@@ -94,7 +117,7 @@ PY
         gap="?"
     fi
 
-    printf "%-15s  %-7s  %-7s  %-8s  %-8s  %-8s  %-7s  %-8s  %s\n" \
-           "$name" "$ep_now" "$ep_bv" "$bv_pct" "$tt_pct" "$tta_f1" "$sota" "$gap" \
+    printf "%-15s  %-10s  %-7s  %-7s  %-8s  %-8s  %-8s  %-7s  %-8s  %s\n" \
+           "$name" "$backbone" "$ep_now" "$ep_bv" "$bv_pct" "$tt_pct" "$tta_f1" "$sota" "$gap" \
            "$state ($sota_who, +${plateau}ep)"
 done
