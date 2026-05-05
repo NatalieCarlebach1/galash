@@ -27,8 +27,12 @@ _ARCH_MAP = {
 }
 
 
-def _convert_weights(src: dict, num_layers: int, embed_dim: int) -> dict:
-    """Convert DINOv2 native checkpoint keys → HuggingFace Dinov2Model keys."""
+def _convert_weights(src: dict, num_layers: int, embed_dim: int, swiglu: bool = False) -> dict:
+    """Convert DINOv2 native checkpoint keys → HuggingFace Dinov2Model keys.
+
+    `swiglu` selects between standard fc1/fc2 MLP (base/small) and SwiGLU
+    (large; w12/w3 in src → weights_in/weights_out in HF).
+    """
     dst = {}
 
     # Embeddings
@@ -68,11 +72,17 @@ def _convert_weights(src: dict, num_layers: int, embed_dim: int) -> dict:
         dst[f"{dp}.attention.output.dense.weight"] = src[f"{sp}.attn.proj.weight"]
         dst[f"{dp}.attention.output.dense.bias"] = src[f"{sp}.attn.proj.bias"]
 
-        # MLP
-        dst[f"{dp}.mlp.fc1.weight"] = src[f"{sp}.mlp.fc1.weight"]
-        dst[f"{dp}.mlp.fc1.bias"] = src[f"{sp}.mlp.fc1.bias"]
-        dst[f"{dp}.mlp.fc2.weight"] = src[f"{sp}.mlp.fc2.weight"]
-        dst[f"{dp}.mlp.fc2.bias"] = src[f"{sp}.mlp.fc2.bias"]
+        # MLP — SwiGLU (w12/w3) for large variants, standard fc1/fc2 otherwise
+        if swiglu:
+            dst[f"{dp}.mlp.weights_in.weight"] = src[f"{sp}.mlp.w12.weight"]
+            dst[f"{dp}.mlp.weights_in.bias"] = src[f"{sp}.mlp.w12.bias"]
+            dst[f"{dp}.mlp.weights_out.weight"] = src[f"{sp}.mlp.w3.weight"]
+            dst[f"{dp}.mlp.weights_out.bias"] = src[f"{sp}.mlp.w3.bias"]
+        else:
+            dst[f"{dp}.mlp.fc1.weight"] = src[f"{sp}.mlp.fc1.weight"]
+            dst[f"{dp}.mlp.fc1.bias"] = src[f"{sp}.mlp.fc1.bias"]
+            dst[f"{dp}.mlp.fc2.weight"] = src[f"{sp}.mlp.fc2.weight"]
+            dst[f"{dp}.mlp.fc2.bias"] = src[f"{sp}.mlp.fc2.bias"]
 
         # Layer norms
         dst[f"{dp}.norm1.weight"] = src[f"{sp}.norm1.weight"]
@@ -118,26 +128,12 @@ def load_dinov2_remote_sensing(
     print(f"Loading DINOv2-RS {arch_name}: dim={embed_dim}, layers={depth}, "
           f"heads={num_heads}, patch={patch_size}, registers={num_registers}")
 
-    # Build HF config
-    hf_config = Dinov2Config(
-        hidden_size=embed_dim,
-        num_hidden_layers=depth,
-        num_attention_heads=num_heads,
-        intermediate_size=embed_dim * int(raw_cfg.get("mlp_ratio", 4)),
-        patch_size=patch_size,
-        image_size=img_size,
-        num_register_tokens=0,  # HF Dinov2Model may not support registers; skip them
-        hidden_act="gelu",
-        qkv_bias=raw_cfg.get("qkv_bias", True),
-        output_hidden_states=True,
-    )
-
-    # Create empty model
-    model = Dinov2Model(hf_config)
+    # We need to peek at the checkpoint to know whether MLP is SwiGLU before
+    # building the HF config (the FFN type is hard-baked into the model).
+    # That means we pull weights first, then construct the model.
 
     # Load weights — try the standalone backbone .pth first, fallback to safetensors
     try:
-        # Find the backbone .pth file
         from huggingface_hub import list_repo_files
         files = list_repo_files(repo_id)
         pth_files = [f for f in files if f.endswith(".pth") and "backbone" in f.lower()]
@@ -148,7 +144,6 @@ def load_dinov2_remote_sensing(
         else:
             raise FileNotFoundError("No .pth backbone file")
     except Exception:
-        # Fallback: load safetensors and extract student.backbone.*
         from safetensors.torch import load_file
         st_path = hf_hub_download(repo_id, "model.safetensors")
         full_sd = load_file(st_path)
@@ -156,8 +151,35 @@ def load_dinov2_remote_sensing(
         src_sd = {k[len(prefix):]: v for k, v in full_sd.items() if k.startswith(prefix)}
         print(f"  loaded from model.safetensors (extracted {len(src_sd)} backbone keys)")
 
+    swiglu = "blocks.0.mlp.w12.weight" in src_sd
+    if swiglu:
+        # Derive intermediate size from the actual weight shape so the HF model
+        # is built with the matching SwiGLU hidden dim (not embed_dim*mlp_ratio,
+        # which differs because SwiGLU uses the (8/3)-trick rounded to 8).
+        intermediate_size = src_sd["blocks.0.mlp.w3.weight"].shape[1]
+    else:
+        intermediate_size = embed_dim * int(raw_cfg.get("mlp_ratio", 4))
+
+    # Build HF config
+    hf_config = Dinov2Config(
+        hidden_size=embed_dim,
+        num_hidden_layers=depth,
+        num_attention_heads=num_heads,
+        intermediate_size=intermediate_size,
+        patch_size=patch_size,
+        image_size=img_size,
+        num_register_tokens=0,  # HF Dinov2Model may not support registers; skip them
+        hidden_act="gelu",
+        use_swiglu_ffn=swiglu,
+        qkv_bias=raw_cfg.get("qkv_bias", True),
+        output_hidden_states=True,
+    )
+
+    # Create empty model
+    model = Dinov2Model(hf_config)
+
     # Convert keys
-    hf_sd = _convert_weights(src_sd, depth, embed_dim)
+    hf_sd = _convert_weights(src_sd, depth, embed_dim, swiglu=swiglu)
 
     # Handle missing layer_scale (fill with ones if HF model expects them)
     model_sd = model.state_dict()
