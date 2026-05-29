@@ -104,6 +104,7 @@ def compute_loss(
     latent_soft=False,
     aux_change_maps=None, w_aux_latent=0.0,
     latent_loss_type: str = "bce",
+    attn_diag=None, w_attn_supervise=0.0,
 ):
     pred = F.interpolate(masks, gt_mask.shape[-2:], mode="bilinear", align_corners=False)
 
@@ -126,6 +127,7 @@ def compute_loss(
     # ambiguity as a soft signal. BCE handles soft targets natively.
     gt_small = F.adaptive_avg_pool2d(gt_mask, (patch_h, patch_w))
     gt_small = gt_small.view(gt_mask.size(0), -1)            # [B, S], in [0, 1]
+    gt_small_frac = gt_small                                  # fractional, before thresholding
     if not latent_soft:
         gt_small = (gt_small > 0.3).float()                  # legacy hard target
     with torch.amp.autocast("cuda", enabled=False):
@@ -162,12 +164,26 @@ def compute_loss(
                 wk = 0.5 ** k        # 1.0, 0.5, 0.25, 0.125, ...
                 loss_aux = loss_aux + wk * F.binary_cross_entropy(prob, tgt_k)
 
+    # Experiment L: supervise attention diagonal only on unchanged patches.
+    # Changed patches have genuinely different content in ref vs tgt — forcing
+    # diagonal attention there is wrong supervision. Restrict to GT-unchanged patches
+    # (pooled GT fraction < 0.1) so the gradient is semantically correct.
+    loss_attn = torch.tensor(0.0, device=masks.device)
+    if attn_diag is not None and w_attn_supervise > 0:
+        log_diag = -torch.log(attn_diag.clamp(min=1e-8))     # [B, S]
+        unchanged = (gt_small_frac < 0.1)                     # [B, S], True = unchanged
+        n_unchanged = unchanged.float().sum()
+        if n_unchanged > 0:
+            loss_attn = (log_diag * unchanged.float()).sum() / n_unchanged
+
     total = (w_bce * loss_bce + w_dice * loss_dice + w_latent * loss_latent
-             + w_iou * loss_iou + w_aux_latent * loss_aux)
+             + w_iou * loss_iou + w_aux_latent * loss_aux
+             + w_attn_supervise * loss_attn)
     return total, dict(
         loss=total.item(), bce=loss_bce.item(), dice=loss_dice.item(),
         iou_loss=loss_iou.item(), latent=loss_latent.item(),
         aux_latent=float(loss_aux.item()) if aux_change_maps else 0.0,
+        attn_loss=loss_attn.item(),
     )
 
 
@@ -177,7 +193,7 @@ def compute_loss(
 def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=50,
                     latent_temperature=0.03, use_ohem=True, ohem_ratio=0.7,
                     latent_soft=False, w_aux_latent=0.0, latent_loss_type="bce",
-                    ema=None):
+                    w_attn_supervise=0.0, ema=None):
     model.train()
     running = {}
     tp = fp = fn = 0
@@ -189,7 +205,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=5
         pw = ref.shape[3] // model.patch_size
 
         with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
-            masks, iou_pred, cmap, aux_maps = model(ref, tgt)
+            masks, iou_pred, cmap, aux_maps, attn_diag = model(ref, tgt)
             loss, metrics = compute_loss(
                 masks, iou_pred, cmap, mask, ph, pw,
                 latent_temperature=latent_temperature,
@@ -197,6 +213,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=5
                 latent_soft=latent_soft,
                 aux_change_maps=aux_maps, w_aux_latent=w_aux_latent,
                 latent_loss_type=latent_loss_type,
+                attn_diag=attn_diag, w_attn_supervise=w_attn_supervise,
             )
 
         optimizer.zero_grad(set_to_none=True)
@@ -223,11 +240,12 @@ def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=5
         if (step + 1) % log_every == 0:
             avg = {k: v / (step + 1) for k, v in running.items()}
             elapsed = time.time() - t0
+            attn_str = f"  attn={avg['attn_loss']:.4f}" if avg.get('attn_loss', 0) > 0 else ""
             print(
                 f"  [epoch {epoch}  step {step+1}/{len(loader)}]  "
                 f"loss={avg['loss']:.4f}  bce={avg['bce']:.4f}  "
-                f"dice={avg['dice']:.4f}  latent={avg['latent']:.4f}  "
-                f"({elapsed:.0f}s)"
+                f"dice={avg['dice']:.4f}  latent={avg['latent']:.4f}"
+                f"{attn_str}  ({elapsed:.0f}s)"
             )
 
     n = max(len(loader), 1)
@@ -255,12 +273,12 @@ def evaluate(model, loader, device, scaler, latent_temperature=0.03, use_tta=Fal
 
         with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
             if use_tta:
-                masks, iou_pred, cmap, _ = model.forward_tta(ref, tgt)
+                masks, iou_pred, cmap, _, _ = model.forward_tta(ref, tgt)
                 # For loss computation with TTA, use None change_map
                 # We skip latent loss during TTA eval
                 cmap_for_loss = torch.zeros(ref.size(0), ph * pw, device=device)
             else:
-                masks, iou_pred, cmap, aux_maps = model(ref, tgt)
+                masks, iou_pred, cmap, aux_maps, _ = model(ref, tgt)
                 cmap_for_loss = cmap
 
             _, metrics = compute_loss(
@@ -406,6 +424,20 @@ class CSVLogger:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _attn_weight(args, epoch: int) -> float:
+    """Return the current attn_supervise weight, linearly decaying to 0 if
+    attn_supervise_decay_epochs > 0. Returns 0 when attn_supervise is off."""
+    if not args.attn_supervise:
+        return 0.0
+    if args.attn_supervise_decay_epochs <= 0:
+        return args.w_attn_supervise
+    frac = max(0.0, 1.0 - epoch / args.attn_supervise_decay_epochs)
+    return args.w_attn_supervise * frac
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -464,6 +496,32 @@ def main():
     p.add_argument("--simple_diff", action="store_true",
                    help="Ablation: replace CrossChangeAttention with elementwise (ref−tgt) difference. "
                         "Removes the cross-attention module entirely to measure its contribution.")
+    p.add_argument("--spatial_refine", action="store_true",
+                   help="Experiment 2: apply a learned large-kernel depthwise conv (15x15) to the "
+                        "cosim change_map to enforce spatial consistency (inspired by SChanger). "
+                        "Initialized to identity so training starts identical to cosim baseline.")
+    p.add_argument("--multi_scale_cross_attn", action="store_true",
+                   help="Experiment 3: replace naive (r-t) subtraction at each intermediate DINOv2 "
+                        "scale with a shared CrossChangeAttention. Gives the Bridge richer relational "
+                        "features at all 4 scales instead of just the final layer.")
+    p.add_argument("--no_diff_bypass", action="store_true",
+                   help="Remove the (r-t) bypass from bridge inputs so the decoder must rely "
+                        "entirely on cross-attention change_tokens. Forces the attention to be "
+                        "load-bearing rather than redundant with the naive difference.")
+    p.add_argument("--attn_diag_init", action="store_true",
+                   help="Initialize Q/K projections as identity so attention starts diagonal.")
+    p.add_argument("--attn_supervise", action="store_true",
+                   help="Experiment F: add NLL loss on the attention diagonal to teach Q/K projections "
+                        "spatial correspondence. Loss = -log(diag(avg_attn)), weight by --w_attn_supervise.")
+    p.add_argument("--w_attn_supervise", type=float, default=0.1,
+                   help="Weight for the attention diagonal supervision loss (default 0.1).")
+    p.add_argument("--attn_diag_change_map", action="store_true",
+                   help="Use 1-diag(attn) as the patch-level change_map instead of "
+                        "1-cosim(ref,tgt). Only meaningful with --attn_diag_init + "
+                        "--attn_supervise so the diagonal is actually informative.")
+    p.add_argument("--attn_supervise_decay_epochs", type=int, default=0,
+                   help="Linearly decay w_attn_supervise to 0 over this many epochs (0 = constant weight). "
+                        "Use e.g. 50 to warm-start spatial correspondence then release the constraint.")
     p.add_argument("--learnable_offset", action="store_true",
                    help="Add a learnable per-patch deformable offset before CrossChangeAttention. "
                         "Learns to compensate for ref/tgt misregistration (e.g. S2Looking parallax). "
@@ -625,6 +683,12 @@ def main():
         bidir_attn=args.bidir_attn,
         local_window=args.local_window,
         simple_diff=args.simple_diff,
+        spatial_refine=args.spatial_refine,
+        multi_scale_cross_attn=args.multi_scale_cross_attn,
+        no_diff_bypass=args.no_diff_bypass,
+        attn_supervise=args.attn_supervise,
+        attn_diag_init=args.attn_diag_init,
+        attn_diag_change_map=args.attn_diag_change_map,
         learnable_offset=args.learnable_offset,
         max_offset=args.max_offset,
         cnn_skip=args.cnn_skip,
@@ -711,6 +775,7 @@ def main():
             latent_soft=args.latent_soft,
             w_aux_latent=args.w_aux_latent,
             latent_loss_type=args.latent_loss,
+            w_attn_supervise=_attn_weight(args, epoch),
             ema=ema,
         )
         scheduler.step()

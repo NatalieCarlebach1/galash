@@ -353,6 +353,106 @@ class CDDataset(Dataset):
 
 
 # ───────────────────────────────────────────────────────────────────────
+# Inria pre-training dataset
+# ───────────────────────────────────────────────────────────────────────
+
+class InriaPretrainDataset(Dataset):
+    """Synthetic change-detection pairs from Inria building segmentation tiles.
+
+    Each sample draws two random 256×256 crops from two *different* 5000×5000
+    tiles. The change label is the XOR of the two building masks — patches
+    where buildings appear in one crop but not the other.  This mirrors the
+    LEVIR-CD task structure and pre-trains building-change features without
+    any temporal data.
+
+    Setup: run scripts/setup_inria.py once to extract the zip into
+      data/inria/train/images/  and  data/inria/train/gt/
+    """
+
+    MEAN = [0.485, 0.456, 0.406]
+    STD  = [0.229, 0.224, 0.225]
+
+    def __init__(self, root: str, img_size: int = 256,
+                 pairs_per_epoch: int = 8000,
+                 seed: Optional[int] = None):
+        self.img_size = img_size
+        self.pairs_per_epoch = pairs_per_epoch
+
+        img_dir = Path(root) / "train" / "images"
+        gt_dir  = Path(root) / "train" / "gt"
+        if not img_dir.exists():
+            raise FileNotFoundError(
+                f"Inria images not found at {img_dir}. "
+                "Run scripts/setup_inria.py first."
+            )
+
+        stems = sorted(p.stem for p in img_dir.glob("*.tif"))
+        self.img_paths = [img_dir / f"{s}.tif" for s in stems]
+        self.gt_paths  = [gt_dir  / f"{s}.tif" for s in stems]
+        assert len(self.img_paths) == len(self.gt_paths) > 0, \
+            f"Expected matching image/GT pairs in {img_dir}"
+
+        self._rng = random.Random(seed)
+        self._to_tensor = __import__('torchvision').transforms.ToTensor()
+        self._normalize = __import__('torchvision').transforms.Normalize(
+            self.MEAN, self.STD)
+
+    def __len__(self):
+        return self.pairs_per_epoch
+
+    def _random_crop(self, img: Image.Image, gt: Image.Image):
+        W, H = img.size
+        s = self.img_size
+        x = self._rng.randint(0, W - s)
+        y = self._rng.randint(0, H - s)
+        return img.crop((x, y, x + s, y + s)), gt.crop((x, y, x + s, y + s))
+
+    def _augment(self, img: Image.Image, gt: Image.Image):
+        # Independent spatial augmentation per crop (ref and tgt come from
+        # different tiles so spatial consistency between them is not needed).
+        if self._rng.random() < 0.5:
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
+            gt  = gt.transpose(Image.FLIP_LEFT_RIGHT)
+        if self._rng.random() < 0.5:
+            img = img.transpose(Image.FLIP_TOP_BOTTOM)
+            gt  = gt.transpose(Image.FLIP_TOP_BOTTOM)
+        k = self._rng.randint(0, 3)
+        if k:
+            img = img.rotate(90 * k)
+            gt  = gt.rotate(90 * k)
+        return img, gt
+
+    def __getitem__(self, idx):
+        # Pick two different tiles
+        i = self._rng.randrange(len(self.img_paths))
+        j = self._rng.randrange(len(self.img_paths) - 1)
+        if j >= i:
+            j += 1
+
+        img_a = Image.open(self.img_paths[i]).convert("RGB")
+        gt_a  = Image.open(self.gt_paths[i]).convert("L")
+        img_b = Image.open(self.img_paths[j]).convert("RGB")
+        gt_b  = Image.open(self.gt_paths[j]).convert("L")
+
+        crop_a_img, crop_a_gt = self._random_crop(img_a, gt_a)
+        crop_b_img, crop_b_gt = self._random_crop(img_b, gt_b)
+        crop_a_img, crop_a_gt = self._augment(crop_a_img, crop_a_gt)
+        crop_b_img, crop_b_gt = self._augment(crop_b_img, crop_b_gt)
+
+        # XOR of building masks → change label
+        mask_a = np.array(crop_a_gt) > 128
+        mask_b = np.array(crop_b_gt) > 128
+        change = (mask_a ^ mask_b).astype(np.uint8) * 255
+        change_pil = Image.fromarray(change, mode="L")
+
+        ref_t  = self._normalize(self._to_tensor(crop_a_img))
+        tgt_t  = self._normalize(self._to_tensor(crop_b_img))
+        mask_t = torch.from_numpy(change).float().unsqueeze(0) / 255.0
+
+        return ref_t, tgt_t, mask_t
+
+
+# ───────────────────────────────────────────────────────────────────────
 # Multi-dataset wrapper
 # ───────────────────────────────────────────────────────────────────────
 class MultiCDDataset(ConcatDataset):

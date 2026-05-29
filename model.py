@@ -204,7 +204,9 @@ class CrossChangeAttention(nn.Module):
     """
 
     def __init__(self, dim: int, num_heads: int = 8, init_temperature: float = 0.07,
-                 bidirectional: bool = False, local_window: int = 1):
+                 bidirectional: bool = False, local_window: int = 1,
+                 spatial_refine: bool = False, spatial_kernel: int = 15,
+                 diag_init: bool = False, attn_diag_change_map: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -217,6 +219,24 @@ class CrossChangeAttention(nn.Module):
         self.v_proj = nn.Linear(dim, dim)
         self.out_proj = nn.Linear(dim, dim)
         self.norm = nn.LayerNorm(dim)
+
+        self.attn_diag_change_map = attn_diag_change_map
+
+        if diag_init:
+            nn.init.eye_(self.q_proj.weight)
+            nn.init.zeros_(self.q_proj.bias)
+            nn.init.eye_(self.k_proj.weight)
+            nn.init.zeros_(self.k_proj.bias)
+
+        # Spatial consistency refiner: large-kernel depthwise conv on the cosim change_map.
+        # Initialized to identity so training starts identical to the cosim baseline.
+        self.spatial_refine = spatial_refine
+        if spatial_refine:
+            k = spatial_kernel
+            self.refiner = nn.Conv2d(1, 1, k, padding=k // 2, bias=True)
+            nn.init.zeros_(self.refiner.weight)
+            self.refiner.weight.data[0, 0, k // 2, k // 2] = 1.0
+            nn.init.zeros_(self.refiner.bias)
 
     @staticmethod
     def _local_window_similarity(avg_attn, h, w, window):
@@ -283,8 +303,26 @@ class CrossChangeAttention(nn.Module):
         else:
             similarity = sim_fwd
 
-        change_map = 1.0 - similarity
-        return change_tokens, change_map
+        # Diagonal of the head-averaged attention [B, S].
+        attn_diag = torch.diagonal(avg_attn_fwd, dim1=1, dim2=2)  # [B, S]
+
+        if self.attn_diag_change_map:
+            # Use attention diagonal as change map: high diagonal = good spatial
+            # match = unchanged. Requires attn_diag_init + attn_supervise to be
+            # meaningful; falls back to noisy signal without them.
+            change_map = 1.0 - attn_diag
+        else:
+            # Default: cosine similarity of frozen DINOv2 features.
+            # Cohen's d ≈ +1.3 vs ≈ 0 for attn diagonal (without supervision).
+            change_map = 1.0 - F.cosine_similarity(ref_tokens, tgt_tokens, dim=-1)
+
+        if self.spatial_refine:
+            B = change_map.shape[0]
+            change_map = self.refiner(
+                change_map.view(B, 1, grid_h, grid_w)
+            ).view(B, -1)
+
+        return change_tokens, change_map, attn_diag
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +756,18 @@ class ChangeDetector(nn.Module):
         cnn_skip: bool = False,
         # Ablation: replace CrossChangeAttention with simple elementwise difference
         simple_diff: bool = False,
+        # Experiment 2: spatial consistency refiner on cosim change_map
+        spatial_refine: bool = False,
+        # Experiment 3: cross-attention at intermediate DINOv2 scales (replaces r-t subtraction)
+        multi_scale_cross_attn: bool = False,
+        # Remove (r-t) bypass: bridge receives only cross-attention change_tokens, no naive diff
+        no_diff_bypass: bool = False,
+        # Experiment F: supervise Q/K attention to concentrate on diagonal (spatial correspondence)
+        attn_supervise: bool = False,
+        # Experiment L: initialize Q/K as identity so attention starts diagonal
+        attn_diag_init: bool = False,
+        # Use attention diagonal as change_map instead of cosine similarity
+        attn_diag_change_map: bool = False,
         # LoRA
         lora_rank: int = 0,
         lora_target: str = "none",
@@ -753,7 +803,15 @@ class ChangeDetector(nn.Module):
         self.cross_attn = CrossChangeAttention(
             self.dino_dim, num_heads, temperature,
             bidirectional=bidir_attn, local_window=local_window,
+            spatial_refine=spatial_refine,
+            diag_init=attn_diag_init,
+            attn_diag_change_map=attn_diag_change_map,
         )
+        # Shared CrossChangeAttention for intermediate DINOv2 scales.
+        # Replaces naive (r-t) subtraction in Bridge input with learned comparison.
+        self.cross_attn_ms = CrossChangeAttention(
+            self.dino_dim, num_heads, temperature,
+        ) if multi_scale_cross_attn else None
 
         # ── Decoder loading ──────────────────────────────────────────
         if sam2_checkpoint and sam2_config:
@@ -808,6 +866,8 @@ class ChangeDetector(nn.Module):
         )
 
         self.simple_diff = simple_diff
+        self.no_diff_bypass = no_diff_bypass
+        self.attn_supervise = attn_supervise
 
         # ── Learnable alignment (TRAINABLE, optional) ────────────────
         self.alignment = LearnableAlignment(self.dino_dim, max_offset) if learnable_offset else None
@@ -885,12 +945,21 @@ class ChangeDetector(nn.Module):
         if self.simple_diff:
             change_tokens = F.layer_norm(ref_tok - tgt_tok, [self.dino_dim])
             change_map = 1.0 - F.cosine_similarity(ref_tok, tgt_tok, dim=-1)
+            attn_diag = None
         else:
-            change_tokens, change_map = self.cross_attn(ref_tok, tgt_tok, grid_h=ph, grid_w=pw)
+            change_tokens, change_map, attn_diag = self.cross_attn(ref_tok, tgt_tok, grid_h=ph, grid_w=pw)
 
-        bridge_input = [
-            (r - t) + change_tokens for r, t in zip(ref_multi, tgt_multi)
-        ]
+        if self.cross_attn_ms is not None:
+            bridge_input = [
+                self.cross_attn_ms(r, t, grid_h=ph, grid_w=pw)[0] + change_tokens
+                for r, t in zip(ref_multi, tgt_multi)
+            ]
+        elif self.no_diff_bypass:
+            bridge_input = [change_tokens] * len(ref_multi)
+        else:
+            bridge_input = [
+                (r - t) + change_tokens for r, t in zip(ref_multi, tgt_multi)
+            ]
 
         th = tw = self.sam_target_size
         image_emb, dense_prompt, high_res_features, aux_change_maps = self.bridge(
@@ -904,7 +973,7 @@ class ChangeDetector(nn.Module):
         # Returns: pixel mask, predicted IoU, patch-level change_map (for legacy
         # latent loss), list of aux change-map logits at multiple scales (for
         # multi-scale latent loss when --multi_scale_latent is set).
-        return masks, iou_pred, change_map, aux_change_maps
+        return masks, iou_pred, change_map, aux_change_maps, attn_diag
 
     # -------- TTA forward --------
     @torch.no_grad()
@@ -928,7 +997,7 @@ class ChangeDetector(nn.Module):
                 r = torch.rot90(r, rot90k, [-2, -1])
                 t = torch.rot90(t, rot90k, [-2, -1])
 
-            masks, iou_pred, _, _ = self(r, t)
+            masks, iou_pred, _, _, _ = self(r, t)
 
             if rot90k > 0:
                 masks = torch.rot90(masks, -rot90k, [-2, -1])
@@ -947,8 +1016,8 @@ class ChangeDetector(nn.Module):
         n = len(transforms)
         avg_prob = mask_sum / n
         avg_logits = torch.logit(avg_prob.clamp(1e-6, 1 - 1e-6))
-        # Aux change maps are train-only; TTA doesn't need them.
-        return avg_logits, iou_sum / n, None, []
+        # Aux change maps and attn_diag are train-only; TTA doesn't need them.
+        return avg_logits, iou_sum / n, None, [], None
 
     # -------- convenience --------
     def trainable_parameters(self):
@@ -968,6 +1037,8 @@ class ChangeDetector(nn.Module):
         main = list(self.bridge.parameters())
         if not self.simple_diff:
             main += list(self.cross_attn.parameters())
+        if self.cross_attn_ms is not None:
+            main += list(self.cross_attn_ms.parameters())
         if self.alignment is not None:
             main += list(self.alignment.parameters())
         if self.cnn_skip_branch is not None:

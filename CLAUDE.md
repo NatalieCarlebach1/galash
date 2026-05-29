@@ -61,15 +61,16 @@ queue overflow. `train.sbatch` already exports `PYTHONUNBUFFERED=1` so
 ## Fair-SOTA bars (no extra CD data, no synthetic, no joint training)
 
 Hardcoded in `scripts/update_backbone_md.py` and `scripts/watch_sweep.sh`.
-Rationale: SChanger / UniChange / ChangeStar+Changen all use extra
-labelled CD data or synthetic pairs, so they're excluded from the
-comparison the paper makes.
+**Note (2026-05-25):** SChanger (arXiv 2503.20734) is FAIR — single-dataset
+training, no synthetic pairs. Pre-trains on Inria single-temporal building
+segmentation only. The bars below have been updated accordingly.
+UniChange and ChangeStar+Changen remain excluded (joint training / synthetic).
 
 | Dataset | Fair SOTA F1 | Method |
 |---|---|---|
-| LEVIR-CD | 90.24 | ChangeFormer (2022) |
+| LEVIR-CD | **92.87** | SChanger (2025) |
 | LEVIR-CD+ | 87.71 | DDCDNet (2024) |
-| S2Looking | 68.60 | FIBTNet (2024) |
-| CDD | 96.12 | RFL-CDNet (2024) |
+| S2Looking | **68.95** | SChanger (2025) |
+| CDD | **97.62** | SChanger (2025) |
 | DSIFN-CD | 96.65 | DDPM-CD (2024) |
 | SECOND-binary | 72.46 | SAM-SCD (2025) |

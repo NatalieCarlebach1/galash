@@ -1,0 +1,38 @@
+dataset: sysu_cd
+img_size: 256
+test_img_size: 256
+
+normalization:
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+augmentations:
+  - {op: random_flip,    direction: horizontal, prob: 0.5}
+  - {op: random_flip,    direction: vertical,   prob: 0.5}
+  - {op: random_rotate,  degrees: 20, prob: 0.5}
+  - {op: random_crop,    size: 256, cat_max_ratio: 0.75}
+  - {op: temporal_swap,  prob: 0.5}
+  - {op: photometric_distortion, brightness_delta: 10,
+     contrast_range: [0.8, 1.2], saturation_range: [0.8, 1.2], hue_delta: 10,
+     prob: 0.5}
+  - {op: color_jitter,   brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.05,
+     independent: true, prob: 0.5}
+  - {op: gaussian_blur,  radius_range: [0.0, 1.0], independent: true, prob: 0.3}
+
+training:
+  batch: 16
+  epochs: 300
+  patience: 15
+  lr: 1.0e-4
+  warmup: 3
+  decoder_lr_scale: 0.1
+  finetune_decoder: false
+  tta: true
+
+# NOTE: split is 9600/1200/1200 (custom, not official 12k/4k/4k)
+# Official 4k test set not available without full 20k download.
+# Test F1 here is NOT directly comparable to published SOTA.
+
+reference_methods:
+  - {name: CDNeXt,   year: 2024, f1: 0.8263, notes: "official 4k test split"}
+  - {name: SChanger, year: 2025, f1: 0.8426, notes: "official 4k test split — fair SOTA"}
