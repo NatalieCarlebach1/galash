@@ -83,31 +83,15 @@ download_if_missing "dinov2-vit-base-remote-sensing-student-backbone.pth" \
 
 cd $GALASH
 
-# ── 5. Download LEVIR-CD dataset ──────────────────────────────
-echo "[5/6] Downloading LEVIR-CD dataset..."
-mkdir -p $DATA/levir_cd
+# ── 5. Download datasets ──────────────────────────────────────
+echo "[5/6] Downloading datasets..."
+pip install -q gdown requests tqdm
+mkdir -p $DATA
+cd $GALASH
 
-if [ ! -d "$DATA/levir_cd/train" ]; then
-    echo "  Downloading LEVIR-CD..."
-    # Download from official source
-    pip install -q gdown
-    # LEVIR-CD Google Drive IDs
-    cd $DATA/levir_cd
-    python3 -c "
-import gdown, zipfile, os
-# Official LEVIR-CD download
-url = 'https://huggingface.co/datasets/torchgeo/LEVIR-CD/resolve/main/LEVIR-CD.zip'
-print('Downloading LEVIR-CD (~1.2 GB)...')
-gdown.download(url, 'LEVIR-CD.zip', quiet=False, fuzzy=True)
-print('Extracting...')
-with zipfile.ZipFile('LEVIR-CD.zip', 'r') as z:
-    z.extractall('.')
-os.remove('LEVIR-CD.zip')
-print('Done.')
-" 2>/dev/null || echo "  Auto-download failed — see manual instructions below."
-else
-    echo "  LEVIR-CD already downloaded."
-fi
+# download_datasets.py handles idempotency (skips if already present)
+python3 download_datasets.py --out $DATA --datasets levir_cd \
+    || echo "  LEVIR-CD auto-download failed — see manual instructions below."
 
 # ── 6. Write launch script ────────────────────────────────────
 echo "[6/6] Writing launch script..."
@@ -149,14 +133,16 @@ echo "PYTHONPATH for all scripts:"
 echo "  export PYTHONPATH=$SAM2_DIR:\$PYTHONPATH"
 echo ""
 
-# ── Manual LEVIR-CD instructions (if auto-download failed) ────
+# ── Manual dataset instructions (if auto-download failed) ────
 echo "------------------------------------------------------"
-echo "If LEVIR-CD download failed, manually download from:"
-echo "  https://chenhao.in/LEVIR/"
-echo "  or: https://huggingface.co/datasets/torchgeo/LEVIR-CD"
+echo "If dataset download failed, run manually:"
+echo "  cd $GALASH"
+echo "  python3 download_datasets.py --list          # see all available"
+echo "  python3 download_datasets.py --out $DATA --datasets levir_cd"
+echo "  python3 download_datasets.py --out $DATA --all  # all datasets"
 echo ""
-echo "Expected structure:"
-echo "  $DATA/levir_cd/"
+echo "Expected structure for each dataset:"
+echo "  $DATA/<dataset>/"
 echo "  ├── train/  A/  B/  label/"
 echo "  ├── val/    A/  B/  label/"
 echo "  └── test/   A/  B/  label/"
