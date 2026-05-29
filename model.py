@@ -768,6 +768,8 @@ class ChangeDetector(nn.Module):
         attn_diag_init: bool = False,
         # Use attention diagonal as change_map instead of cosine similarity
         attn_diag_change_map: bool = False,
+        # Auxiliary BCE head directly on change_tokens → ensures gradient flows through attention
+        aux_ct_supervise: bool = False,
         # LoRA
         lora_rank: int = 0,
         lora_target: str = "none",
@@ -868,6 +870,10 @@ class ChangeDetector(nn.Module):
         self.simple_diff = simple_diff
         self.no_diff_bypass = no_diff_bypass
         self.attn_supervise = attn_supervise
+
+        # Auxiliary head: 1×1 linear on change_tokens → patch-level change logit
+        # Forces gradient to explicitly flow through attention Q/K projections
+        self.aux_ct_head = nn.Linear(self.dino_dim, 1) if aux_ct_supervise else None
 
         # ── Learnable alignment (TRAINABLE, optional) ────────────────
         self.alignment = LearnableAlignment(self.dino_dim, max_offset) if learnable_offset else None
@@ -970,10 +976,14 @@ class ChangeDetector(nn.Module):
             high_res_features = self.cnn_skip_branch(ref, tgt, th)
 
         masks, iou_pred = self._decode(image_emb, dense_prompt, high_res_features, B)
-        # Returns: pixel mask, predicted IoU, patch-level change_map (for legacy
-        # latent loss), list of aux change-map logits at multiple scales (for
-        # multi-scale latent loss when --multi_scale_latent is set).
-        return masks, iou_pred, change_map, aux_change_maps, attn_diag
+
+        # Auxiliary change_tokens supervision: [B, S, D] → [B, S] logit at patch level
+        # None when --aux_ct_supervise is not set
+        aux_ct_logit = None
+        if self.aux_ct_head is not None:
+            aux_ct_logit = self.aux_ct_head(change_tokens).squeeze(-1)  # [B, S]
+
+        return masks, iou_pred, change_map, aux_change_maps, attn_diag, aux_ct_logit
 
     # -------- TTA forward --------
     @torch.no_grad()
@@ -1043,6 +1053,8 @@ class ChangeDetector(nn.Module):
             main += list(self.alignment.parameters())
         if self.cnn_skip_branch is not None:
             main += list(self.cnn_skip_branch.parameters())
+        if self.aux_ct_head is not None:
+            main += list(self.aux_ct_head.parameters())
         groups = [{"params": main, "lr": lr}]
 
         # SAM decoder full FT at decoder_lr_scale × lr (legacy).

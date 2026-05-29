@@ -105,6 +105,7 @@ def compute_loss(
     aux_change_maps=None, w_aux_latent=0.0,
     latent_loss_type: str = "bce",
     attn_diag=None, w_attn_supervise=0.0,
+    aux_ct_logit=None, w_aux_ct=0.0,
 ):
     pred = F.interpolate(masks, gt_mask.shape[-2:], mode="bilinear", align_corners=False)
 
@@ -176,14 +177,26 @@ def compute_loss(
         if n_unchanged > 0:
             loss_attn = (log_diag * unchanged.float()).sum() / n_unchanged
 
+    # Auxiliary supervision directly on change_tokens at patch level.
+    # GT downsampled to patch resolution; forces gradient through Q/K projections.
+    loss_aux_ct = torch.tensor(0.0, device=masks.device)
+    if aux_ct_logit is not None and w_aux_ct > 0:
+        with torch.amp.autocast("cuda", enabled=False):
+            gt_patch = F.adaptive_avg_pool2d(gt_mask.float(), (patch_h, patch_w))
+            gt_patch = (gt_patch.view(gt_mask.size(0), -1) > 0.3).float()
+            loss_aux_ct = F.binary_cross_entropy_with_logits(
+                aux_ct_logit.float(), gt_patch
+            )
+
     total = (w_bce * loss_bce + w_dice * loss_dice + w_latent * loss_latent
              + w_iou * loss_iou + w_aux_latent * loss_aux
-             + w_attn_supervise * loss_attn)
+             + w_attn_supervise * loss_attn + w_aux_ct * loss_aux_ct)
     return total, dict(
         loss=total.item(), bce=loss_bce.item(), dice=loss_dice.item(),
         iou_loss=loss_iou.item(), latent=loss_latent.item(),
         aux_latent=float(loss_aux.item()) if aux_change_maps else 0.0,
         attn_loss=loss_attn.item(),
+        aux_ct_loss=loss_aux_ct.item(),
     )
 
 
@@ -193,7 +206,7 @@ def compute_loss(
 def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=50,
                     latent_temperature=0.03, use_ohem=True, ohem_ratio=0.7,
                     latent_soft=False, w_aux_latent=0.0, latent_loss_type="bce",
-                    w_attn_supervise=0.0, ema=None):
+                    w_attn_supervise=0.0, w_aux_ct=0.0, ema=None):
     model.train()
     running = {}
     tp = fp = fn = 0
@@ -205,7 +218,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=5
         pw = ref.shape[3] // model.patch_size
 
         with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
-            masks, iou_pred, cmap, aux_maps, attn_diag = model(ref, tgt)
+            masks, iou_pred, cmap, aux_maps, attn_diag, aux_ct_logit = model(ref, tgt)
             loss, metrics = compute_loss(
                 masks, iou_pred, cmap, mask, ph, pw,
                 latent_temperature=latent_temperature,
@@ -214,6 +227,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device, epoch, log_every=5
                 aux_change_maps=aux_maps, w_aux_latent=w_aux_latent,
                 latent_loss_type=latent_loss_type,
                 attn_diag=attn_diag, w_attn_supervise=w_attn_supervise,
+                aux_ct_logit=aux_ct_logit, w_aux_ct=w_aux_ct,
             )
 
         optimizer.zero_grad(set_to_none=True)
@@ -278,7 +292,7 @@ def evaluate(model, loader, device, scaler, latent_temperature=0.03, use_tta=Fal
                 # We skip latent loss during TTA eval
                 cmap_for_loss = torch.zeros(ref.size(0), ph * pw, device=device)
             else:
-                masks, iou_pred, cmap, aux_maps, _ = model(ref, tgt)
+                masks, iou_pred, cmap, aux_maps, _, _ = model(ref, tgt)
                 cmap_for_loss = cmap
 
             _, metrics = compute_loss(
@@ -322,7 +336,7 @@ def _search_threshold(model, val_loader, device, scaler, use_tta=False,
             if use_tta:
                 masks, _, _, _ = model.forward_tta(ref, tgt)
             else:
-                masks, _, _, _ = model(ref, tgt)
+                masks, _, _, _, _, _ = model(ref, tgt)
         pred = F.interpolate(masks, mask.shape[-2:], mode="bilinear", align_corners=False)
         all_preds.append(pred.sigmoid().cpu())
         all_gts.append(mask.cpu())
@@ -522,6 +536,12 @@ def main():
     p.add_argument("--attn_supervise_decay_epochs", type=int, default=0,
                    help="Linearly decay w_attn_supervise to 0 over this many epochs (0 = constant weight). "
                         "Use e.g. 50 to warm-start spatial correspondence then release the constraint.")
+    p.add_argument("--aux_ct_supervise", action="store_true",
+                   help="Add a lightweight linear head on change_tokens that predicts the patch-level "
+                        "change mask. Forces gradients to flow through Q/K projections, ensuring "
+                        "the attention is load-bearing rather than decorative.")
+    p.add_argument("--w_aux_ct", type=float, default=0.5,
+                   help="Weight for the change_tokens auxiliary BCE loss (default 0.5).")
     p.add_argument("--learnable_offset", action="store_true",
                    help="Add a learnable per-patch deformable offset before CrossChangeAttention. "
                         "Learns to compensate for ref/tgt misregistration (e.g. S2Looking parallax). "
@@ -689,6 +709,7 @@ def main():
         attn_supervise=args.attn_supervise,
         attn_diag_init=args.attn_diag_init,
         attn_diag_change_map=args.attn_diag_change_map,
+        aux_ct_supervise=args.aux_ct_supervise,
         learnable_offset=args.learnable_offset,
         max_offset=args.max_offset,
         cnn_skip=args.cnn_skip,
@@ -776,6 +797,7 @@ def main():
             w_aux_latent=args.w_aux_latent,
             latent_loss_type=args.latent_loss,
             w_attn_supervise=_attn_weight(args, epoch),
+            w_aux_ct=args.w_aux_ct,
             ema=ema,
         )
         scheduler.step()
